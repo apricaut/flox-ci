@@ -81,6 +81,20 @@ jobs:
           restore-keys: |
             flox-${{ runner.os }}-
       - uses: flox/install-flox-action@v2
+      # Cache the Nix store (flox build outputs + toolchain + deps) via the free
+      # GitHub Actions cache backend — `flox build` is a hermetic Nix build, so
+      # unchanged builds become near-instant and changed ones reuse unchanged
+      # store paths. GC keeps the cached store from outgrowing the cache limit.
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.flox/env/manifest.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 604800
+          purge-primary-key: never
 
       - name: Lint + test inside the Flox env
         run: |
