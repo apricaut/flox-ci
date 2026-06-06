@@ -8,11 +8,11 @@ name: flox-ci
 #       uses: apricaut/flox-ci/.github/workflows/flox-ci.yml@v1
 #       secrets: inherit
 #
+# ONE job: the app is built exactly once. `flox build` populates the Nix store,
+# then on push-to-main the `flox publish` step reuses that derivation (cache
+# hit) instead of rebuilding — so merges don't pay for two ~20-min builds.
 # Everything (toolchain via flox, build, publish, env push, promotion, caching)
-# lives HERE so the pipeline changes in one place across every product — no
-# per-repo config drift. The app repo only carries its code + its `.flox/`
-# manifests (build target + deploy env named after the repo, scaffolded by
-# `apri service new`).
+# lives HERE so the pipeline changes in one place across every product.
 on:
   workflow_call:
     inputs:
@@ -42,8 +42,8 @@ env:
   SQLX_OFFLINE: "true"
 
 jobs:
-  verify:
-    name: verify (lint + test + build)
+  ci:
+    name: build (+ publish on main)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -59,15 +59,18 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/ci_test
       JWT_SECRET: ci-test-secret-value-that-is-long-enough-for-hmac-validation
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # publish requires the pushed revision
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
           df -h /
-      # Persist the Flox env cache (rustup toolchain + cargo registry/git, which
-      # the manifest hook points CARGO_HOME/RUSTUP_HOME at) and the cargo target
-      # dir, so lint/test don't reinstall the toolchain or recompile deps each run.
+      # Persist the Flox env cache (rustup toolchain + cargo registry/git) and the
+      # cargo target dir, so lint/test don't reinstall the toolchain or recompile
+      # deps each run.
       - name: Cache Flox toolchain + cargo + target
         uses: actions/cache@v4
         with:
@@ -78,9 +81,8 @@ jobs:
           restore-keys: |
             flox-${{ runner.os }}-
       - uses: flox/install-flox-action@v2
+
       - name: Lint + test inside the Flox env
-        # Integration tests self-migrate (tests/common/mod.rs run_migrations), so
-        # no sqlx-cli is needed — just the Postgres service + DATABASE_URL.
         run: |
           flox activate -- bash -euo pipefail -c '
             cargo fmt --all -- --check
@@ -88,37 +90,29 @@ jobs:
             cargo test --workspace --exclude server
             cargo test -p server --features server -- --test-threads=1
           '
+
       - name: Build the app (Flox package)
-        # Build target is named after the repo (e.g. district12), publishing as
-        # <owner>/<repo>; derive it rather than hardcoding.
+        # The build target is named after the repo (apri rewrites [build.<repo>]
+        # on scaffold). This populates the Nix store; the publish step below
+        # reuses the exact derivation rather than rebuilding.
         run: |
           APP="${GITHUB_REPOSITORY##*/}"
           flox build "$APP"
           test -x "result-$APP/bin/app"
           test -f "result-$APP/bin/public/index.html"
 
-  deliver:
-    name: publish + promote
-    needs: verify
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    env:
-      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # publish requires the pushed revision
-      - uses: flox/install-flox-action@v2
+      # ---- everything below runs ONLY on push to main ----
       - uses: dopplerhq/cli-action@v3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
       - name: Publish package + push the runtime env to FloxHub
-        # Per-app, named after the repo (e.g. district12):
-        #   1. publish the build target -> package <owner>/<repo>
-        #   2. install it into the deploy env (relocks onto the new generation)
-        #   3. push the deploy env      -> env     <owner>/<repo>
-        # FLOX_FLOXHUB_TOKEN is the owner's account token (shared by every app),
-        # so it lives once in <doppler_project>/<doppler_config>. The CI token is
-        # account-wide with no default config, so name the project/config.
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # 1. publish the (already-built) target -> package <owner>/<repo>
+        # 2. install it into the deploy env (relocks onto the new generation)
+        # 3. push the deploy env                -> env     <owner>/<repo>
+        # FLOX_FLOXHUB_TOKEN (the owner's account token, shared by every app)
+        # lives in <project>/<config>; the CI token is account-wide with no
+        # default config, so name the project/config explicitly.
         env:
           OWNER: ${{ inputs.floxhub_owner }}
           DP_PROJECT: ${{ inputs.doppler_project }}
@@ -132,16 +126,13 @@ jobs:
           "${dr[@]}" flox push -d deploy --owner "$OWNER" --force
 
       - name: Promote to the cluster (open + auto-merge a deploy PR)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         # `flox push` updated FloxHub, but ArgoCD watches Git, not FloxHub, and the
         # pod only re-pulls its environment on restart. The in-cluster flox shim
         # accepts ONLY a plain owner/name ref in flox.dev/environment (a generation
         # like owner/name/2 CrashLoops the pod), so we DON'T touch that — we bump a
         # flox.dev/revision annotation (a pod-template change ArgoCD rolls on),
         # which makes the pod re-pull the latest published environment.
-        #
-        # GitHub forbids approving your own PR, so CI auto-MERGES it. The deploy
-        # token (Contents + Pull-requests write on the gitops repo) lives in
-        # Doppler, read with the same CI token.
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           DP_PROJECT: ${{ inputs.doppler_project }}
