@@ -1,8 +1,0 @@
-name: noop
-on:
-  workflow_call:
-jobs:
-  noop:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo ok
