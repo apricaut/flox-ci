@@ -139,6 +139,39 @@ jobs:
           "${dr[@]}" flox install "$OWNER/$APP" -d deploy
           "${dr[@]}" flox push -d deploy --owner "$OWNER" --force
 
+      # Pull the apricaut App credentials from Doppler (no GitHub-stored secrets).
+      # The private key is masked line-by-line before it ever reaches a step output.
+      - name: Read apricaut App creds from Doppler
+        id: app
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+        run: |
+          set -euo pipefail
+          ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          echo "::add-mask::$ID"
+          echo "app-id=$ID" >> "$GITHUB_OUTPUT"
+          KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
+          { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${GITOPS_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      # Mint a short-lived token from the apricaut GitHub App, scoped to the gitops
+      # repo. The App is installed there with write access (the personal PAT was not,
+      # which is the 403 this replaces). The action does the JWT signing for us.
+      - name: Mint apricaut App token
+        id: token
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.app.outputs.app-id }}
+          private-key: ${{ steps.app.outputs.private-key }}
+          owner: ${{ steps.app.outputs.owner }}
+          repositories: ${{ steps.app.outputs.repo }}
+
       - name: Promote to the cluster (open + auto-merge a deploy PR)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         # `flox push` updated FloxHub, but ArgoCD watches Git, not FloxHub, and the
@@ -149,17 +182,13 @@ jobs:
         # which makes the pod re-pull the latest published environment.
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
-          DP_PROJECT: ${{ inputs.doppler_project }}
-          DP_CONFIG: ${{ inputs.doppler_config }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
           APP="${GITHUB_REPOSITORY##*/}"
-          DEPLOY_TOKEN="$(doppler secrets get APRICAUT_DEPLOY_TOKEN --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
-          echo "::add-mask::$DEPLOY_TOKEN"
-          export GH_TOKEN="$DEPLOY_TOKEN"
 
           git clone --depth 1 \
-            "https://x-access-token:${DEPLOY_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
           cd gitops
           DEPLOY="apps/$APP/base/deployment.yaml"
           jq -c --arg sha "$GITHUB_SHA" \
