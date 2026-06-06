@@ -97,6 +97,11 @@ jobs:
           purge-primary-key: never
 
       - name: Lint + test inside the Flox env
+        # Correctness gate — runs on PRs only. A push to main is a merged PR that
+        # already passed this, so main skips straight to the build. Net effect:
+        # ONE compile per run (cargo here on PRs; the Nix/dx build below on main),
+        # instead of compiling twice in the same run.
+        if: github.event_name == 'pull_request'
         run: |
           flox activate -- bash -euo pipefail -c '
             cargo fmt --all -- --check
@@ -106,9 +111,12 @@ jobs:
           '
 
       - name: Build the app (Flox package)
-        # The build target is named after the repo (apri rewrites [build.<repo>]
-        # on scaffold). This populates the Nix store; the publish step below
-        # reuses the exact derivation rather than rebuilding.
+        # Builds + ships only on a push to main, so a run never compiles twice:
+        # PRs run cargo (above); main runs the Nix/dx build (here). The build
+        # target is named after the repo (apri rewrites [build.<repo>] on
+        # scaffold). This populates the Nix store; the publish step below reuses
+        # the exact derivation rather than rebuilding.
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           APP="${GITHUB_REPOSITORY##*/}"
           flox build "$APP"
