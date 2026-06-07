@@ -8,11 +8,12 @@ name: flox-ci
 #       uses: apricaut/flox-ci/.github/workflows/flox-ci.yml@v1
 #       secrets: inherit
 #
-# ONE job: the app is built exactly once. `flox build` populates the Nix store,
-# then on push-to-main the `flox publish` step reuses that derivation (cache
-# hit) instead of rebuilding — so merges don't pay for two ~20-min builds.
-# Everything (toolchain via flox, build, publish, env push, promotion, caching)
-# lives HERE so the pipeline changes in one place across every product.
+# ONE app build per run. PRs are compile-checked by `cargo clippy` (cheap); on
+# push-to-main `flox publish` builds the release `dx bundle` ONCE and publishes
+# it. There is intentionally no separate `flox build` step — the build is impure
+# (rustup/cargo/dx) and Nix won't cache-reuse it, so a second build invocation
+# would just recompile the whole app. Everything (toolchain via flox, publish,
+# env push, promotion, caching) lives HERE so the pipeline changes in one place.
 on:
   workflow_call:
     inputs:
@@ -110,18 +111,12 @@ jobs:
             cargo test -p server --features server -- --test-threads=1
           '
 
-      - name: Build the app (Flox package)
-        # Builds + ships only on a push to main, so a run never compiles twice:
-        # PRs run cargo (above); main runs the Nix/dx build (here). The build
-        # target is named after the repo (apri rewrites [build.<repo>] on
-        # scaffold). This populates the Nix store; the publish step below reuses
-        # the exact derivation rather than rebuilding.
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: |
-          APP="${GITHUB_REPOSITORY##*/}"
-          flox build "$APP"
-          test -x "result-$APP/bin/app"
-          test -f "result-$APP/bin/public/index.html"
+      # NOTE: there is deliberately NO separate `flox build` step. `flox publish`
+      # below builds the target itself (from a clean clone), and the build is an
+      # impure rustup/cargo/dx-bundle build that Nix does NOT cache-reuse across
+      # invocations — so a separate `flox build` would compile the whole app a
+      # SECOND time (~13 min wasted). PRs get compile-checked by `cargo clippy`
+      # above; the release `dx bundle` is built once, at publish time, on main.
 
       # ---- everything below runs ONLY on push to main ----
       - uses: dopplerhq/cli-action@v3
@@ -129,7 +124,8 @@ jobs:
 
       - name: Publish package + push the runtime env to FloxHub
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        # 1. publish the (already-built) target -> package <owner>/<repo>
+        # 1. publish: BUILDS the target from a clean clone + publishes it ->
+        #    package <owner>/<repo>  (this is the ONE app build per run)
         # 2. install it into the deploy env (relocks onto the new generation)
         # 3. push the deploy env                -> env     <owner>/<repo>
         # FLOX_FLOXHUB_TOKEN (the owner's account token, shared by every app)
