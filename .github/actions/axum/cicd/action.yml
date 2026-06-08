@@ -1,0 +1,149 @@
+name: axum-cicd
+description: >-
+  CI/CD for a Flox-packaged axum service. Lints, tests and builds the binary
+  inside the Flox env, then (when publish=true) publishes it to FloxHub and
+  promotes the deploy by bumping the manifest's flox.dev/revision through an
+  auto-merged PR. A leaner, DB-free sibling of the dioxus `flox.yml` — same
+  publish/promote model, no postgres service or wasm bundle.
+
+inputs:
+  app:
+    description: Flox build target / package name; also the binary at result-<app>/bin/<app>.
+    required: false
+    default: ${{ github.event.repository.name }}
+  working-directory:
+    description: Dir containing the `.flox` env (repo root for app repos; the crate dir in a monorepo).
+    required: false
+    default: "."
+  cargo-scope:
+    description: Scope for clippy/test — "--workspace" for an app repo, or "-p <crate>" for one member of a monorepo.
+    required: false
+    default: "--workspace"
+  publish:
+    description: 'When "true", run the publish + promote (deliver) phase. Caller gates this on a main push.'
+    required: false
+    default: "false"
+  floxhub-owner:
+    description: FloxHub owner the env is published under.
+    required: false
+    default: tyler-harpool
+  deploy-repo:
+    description: GitOps repo whose deploy manifest is bumped to promote.
+    required: false
+    default: apricaut/apricaut
+  deploy-manifest:
+    description: Path within deploy-repo to the deployment.yaml whose flox.dev/revision is bumped.
+    required: false
+    default: ""
+  doppler-token:
+    description: Doppler token for the deliver phase (injects FLOX_FLOXHUB_TOKEN + reads APRICAUT_DEPLOY_TOKEN).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+          /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+        df -h /
+
+    # Persist the Flox env cache (toolchain + cargo registry/git) and the cargo
+    # target dir so lint/test/build don't reinstall or recompile each run.
+    - name: Cache Flox toolchain + cargo + target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ inputs.working-directory }}/.flox/cache
+          target
+        key: axum-flox-${{ runner.os }}-${{ hashFiles('Cargo.lock', format('{0}/.flox/env/manifest.lock', inputs.working-directory)) }}
+        restore-keys: |
+          axum-flox-${{ runner.os }}-
+
+    - uses: flox/install-flox-action@v2
+
+    - name: Lint + test + build inside the Flox env
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        flox activate -- bash -euo pipefail -c '
+          cargo fmt --all -- --check
+          cargo clippy ${{ inputs.cargo-scope }} -- -D warnings
+          cargo test ${{ inputs.cargo-scope }}
+        '
+        flox build "${{ inputs.app }}"
+        test -x "result-${{ inputs.app }}/bin/${{ inputs.app }}"
+
+    # ---- deliver: publish to FloxHub + promote. Only when publish == 'true'. ----
+    - name: Install Doppler
+      if: ${{ inputs.publish == 'true' }}
+      uses: dopplerhq/cli-action@v3
+
+    - name: Publish package + push the runtime env to FloxHub
+      if: ${{ inputs.publish == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        DOPPLER_TOKEN: ${{ inputs.doppler-token }}
+      run: |
+        set -euo pipefail
+        APP="${{ inputs.app }}"
+        OWNER="${{ inputs.floxhub-owner }}"
+        # A personal DOPPLER_TOKEN has no default config, so name project/config.
+        dr=(doppler run --project platform --config common --)
+        "${dr[@]}" flox publish "$APP"
+        "${dr[@]}" flox install "$OWNER/$APP" -d deploy
+        "${dr[@]}" flox push -d deploy --owner "$OWNER" --force
+
+    - name: Promote (bump flox.dev/revision via auto-merged PR)
+      if: ${{ inputs.publish == 'true' }}
+      shell: bash
+      env:
+        DOPPLER_TOKEN: ${{ inputs.doppler-token }}
+      run: |
+        set -euo pipefail
+        APP="${{ inputs.app }}"
+        REPO="${{ inputs.deploy-repo }}"
+        MANIFEST="${{ inputs.deploy-manifest }}"
+        if [ -z "$MANIFEST" ]; then
+          echo "deploy-manifest input is required when publish=true" >&2; exit 1
+        fi
+        # Fine-grained token (Contents + PRs write on the gitops repo), kept in Doppler.
+        TOKEN="$(doppler secrets get APRICAUT_DEPLOY_TOKEN --project platform --config common --plain)"
+        echo "::add-mask::$TOKEN"
+        export GH_TOKEN="$TOKEN"
+
+        git clone --depth 1 \
+          "https://x-access-token:${TOKEN}@github.com/${REPO}.git" gitops
+        cd gitops
+        # Bump ONLY flox.dev/revision — leave flox.dev/environment as plain owner/name
+        # (a generation-pinned ref crashloops the in-cluster flox shim).
+        jq -c --arg sha "$GITHUB_SHA" \
+          '.spec.template.metadata.annotations["flox.dev/revision"] = $sha' \
+          "$MANIFEST" > "$MANIFEST.tmp"
+        mv "$MANIFEST.tmp" "$MANIFEST"
+        if git diff --quiet -- "$MANIFEST"; then
+          echo "revision unchanged; nothing to promote"; exit 0
+        fi
+
+        BRANCH="deploy/$APP/${GITHUB_SHA:0:7}"
+        git config user.name "$APP-ci"
+        git config user.email "ci@apricaut.com"
+        git checkout -b "$BRANCH"
+        git commit -am "deploy($APP): roll to ${GITHUB_SHA:0:7}"
+        git push origin "$BRANCH"
+
+        gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+          --title "deploy($APP): roll to ${GITHUB_SHA:0:7}" \
+          --body "Automated promotion. Bumps flox.dev/revision so ArgoCD rolls the pod onto the latest published FloxHub environment."
+
+        # Auto-merge (GitHub blocks self-approval). Retry while mergeability computes.
+        for attempt in 1 2 3 4 5; do
+          if gh pr merge "$BRANCH" --repo "$REPO" --squash --delete-branch; then
+            echo "promotion PR merged"; exit 0
+          fi
+          echo "merge not ready (attempt ${attempt}); retrying…"; sleep 5
+        done
+        echo "failed to merge promotion PR" >&2; exit 1
