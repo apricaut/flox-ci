@@ -41,6 +41,18 @@ on:
 env:
   # Compile against the committed .sqlx cache, so fmt/clippy/check need no DB.
   SQLX_OFFLINE: "true"
+  # --- Compile-speed knobs (apply to every cargo invocation) ---
+  # Incremental compilation only pays off across edits on a warm dev machine; in
+  # CI the target dir is restored from cache, so incremental just adds bookkeeping
+  # overhead and bloats the cache. Off is faster here.
+  CARGO_INCREMENTAL: "0"
+  # Skip full debuginfo in the dev profile used by clippy + test. Codegen of debug
+  # info is a large slice of a cold dioxus build; line-tables keep panic locations
+  # readable without the cost. (The release dx bundle already strips symbols.)
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  # Don't abort a 25-min build on a transient crates.io blip.
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: "1"
 
 jobs:
   ci:
