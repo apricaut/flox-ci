@@ -138,7 +138,9 @@ jobs:
                 ;;
               *)
                 # axum and other server-only frameworks: one host-target test pass.
-                cargo test --workspace
+                # --test-threads=1 because server integration tests share a single
+                # Postgres and must not race on database setup/teardown.
+                cargo test --workspace -- --test-threads=1
                 ;;
             esac
           '
