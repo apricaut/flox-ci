@@ -1,0 +1,24 @@
+name: dioxus-web
+
+# Framework wrapper: a Dioxus web/server app -> flox -> cluster.
+# Thin entry point so apps reference a framework-named workflow:
+#
+#   jobs:
+#     ci:
+#       uses: apricaut/flox-ci/.github/workflows/dioxus-web.yml@v1
+#       secrets: inherit
+#
+# All logic lives in _flox-ci.yml; this only presets framework=dioxus.
+on:
+  workflow_call:
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token scoped to the shared CI config (FloxHub + deploy)"
+        required: true
+
+jobs:
+  ci:
+    uses: apricaut/flox-ci/.github/workflows/_flox-ci.yml@v1
+    with:
+      framework: dioxus
+    secrets: inherit

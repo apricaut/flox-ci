@@ -1,0 +1,256 @@
+name: _flox-ci
+
+# BASE reusable pipeline (build -> publish -> push runtime env -> promote) for
+# apricaut SERVER apps that deploy to the cluster via flox + ArgoCD.
+#
+# Don't call this directly — call a framework wrapper, which presets `framework`:
+#
+#   jobs:
+#     ci:
+#       uses: apricaut/flox-ci/.github/workflows/dioxus-web.yml@v1   # or axum-web.yml
+#       secrets: inherit
+#
+# The build command lives in each app's flox [build]; this pipeline only varies
+# its lint/test shape by `framework`. ONE app build per run: PRs compile-check
+# via cargo clippy; push-to-main `flox publish` builds the release artifact once
+# (no separate `flox build` — the impure cargo/dx build isn't Nix-cache-reused,
+# so a second invocation would just recompile the whole app).
+#
+# Client releases (desktop/ios/android) are a SEPARATE platform-organized family
+# (apricaut/app-ci) — signing + stores, not flox/k8s — and do NOT live here.
+on:
+  workflow_call:
+    inputs:
+      floxhub_owner:
+        description: "FloxHub account the package + runtime env are published under"
+        type: string
+        default: tyler-harpool
+      gitops_repo:
+        description: "Repo holding apps/<name>/ deploy manifests to promote into"
+        type: string
+        default: apricaut/apricaut
+      doppler_project:
+        description: "Doppler project holding the shared CI secrets (FloxHub + deploy tokens)"
+        type: string
+        default: platform
+      doppler_config:
+        description: "Doppler config within that project the CI token can read"
+        type: string
+        default: common
+      framework:
+        description: "App framework: dioxus (wasm client + server) or axum (server only). Selects the lint/test shape; the build command itself lives in the app's flox [build]."
+        type: string
+        default: dioxus
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token scoped to <doppler_project>/<doppler_config>"
+        required: true
+
+env:
+  # Compile against the committed .sqlx cache, so fmt/clippy/check need no DB.
+  SQLX_OFFLINE: "true"
+  # --- Compile-speed knobs (apply to every cargo invocation) ---
+  # Incremental compilation only pays off across edits on a warm dev machine; in
+  # CI the target dir is restored from cache, so incremental just adds bookkeeping
+  # overhead and bloats the cache. Off is faster here.
+  CARGO_INCREMENTAL: "0"
+  # Skip full debuginfo in the dev profile used by clippy + test. Codegen of debug
+  # info is a large slice of a cold dioxus build; line-tables keep panic locations
+  # readable without the cost. (The release dx bundle already strips symbols.)
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  # Don't abort a 25-min build on a transient crates.io blip.
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  ci:
+    name: build (+ publish on main)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ci_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/ci_test
+      JWT_SECRET: ci-test-secret-value-that-is-long-enough-for-hmac-validation
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # publish requires the pushed revision
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          df -h /
+      # Persist the Flox env cache (rustup toolchain + cargo registry/git) and the
+      # cargo target dir, so lint/test don't reinstall the toolchain or recompile
+      # deps each run.
+      - name: Cache Flox toolchain + cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            .flox/cache
+            target
+          key: flox-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.flox/env/manifest.lock') }}
+          restore-keys: |
+            flox-${{ runner.os }}-
+      - uses: flox/install-flox-action@v2
+      # Cache the Nix store (flox build outputs + toolchain + deps) via the free
+      # GitHub Actions cache backend — `flox build` is a hermetic Nix build, so
+      # unchanged builds become near-instant and changed ones reuse unchanged
+      # store paths. GC keeps the cached store from outgrowing the cache limit.
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.flox/env/manifest.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 604800
+          purge-primary-key: never
+
+      - name: Lint + test inside the Flox env
+        # Correctness gate — runs on PRs only. A push to main is a merged PR that
+        # already passed this, so main skips straight to the build. Net effect:
+        # ONE compile per run (cargo here on PRs; the Nix/dx build below on main),
+        # instead of compiling twice in the same run.
+        if: github.event_name == 'pull_request'
+        env:
+          FRAMEWORK: ${{ inputs.framework }}
+        run: |
+          flox activate -- bash -euo pipefail -c '
+            cargo fmt --all -- --check
+            cargo clippy --workspace -- -D warnings
+            case "$FRAMEWORK" in
+              dioxus)
+                # dioxus splits client/server: the `server` feature is server-only,
+                # so test the workspace without it, then the server crate with it.
+                cargo test --workspace --exclude server
+                cargo test -p server --features server -- --test-threads=1
+                ;;
+              *)
+                # axum and other server-only frameworks: one host-target test pass.
+                cargo test --workspace
+                ;;
+            esac
+          '
+
+      # NOTE: there is deliberately NO separate `flox build` step. `flox publish`
+      # below builds the target itself (from a clean clone), and the build is an
+      # impure rustup/cargo/dx-bundle build that Nix does NOT cache-reuse across
+      # invocations — so a separate `flox build` would compile the whole app a
+      # SECOND time (~13 min wasted). PRs get compile-checked by `cargo clippy`
+      # above; the release `dx bundle` is built once, at publish time, on main.
+
+      # ---- everything below runs ONLY on push to main ----
+      - uses: dopplerhq/cli-action@v3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+      - name: Publish package + push the runtime env to FloxHub
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # 1. publish: BUILDS the target from a clean clone + publishes it ->
+        #    package <owner>/<repo>  (this is the ONE app build per run)
+        # 2. install it into the deploy env (relocks onto the new generation)
+        # 3. push the deploy env                -> env     <owner>/<repo>
+        # FLOX_FLOXHUB_TOKEN (the owner's account token, shared by every app)
+        # lives in <project>/<config>; the CI token is account-wide with no
+        # default config, so name the project/config explicitly.
+        env:
+          OWNER: ${{ inputs.floxhub_owner }}
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+        run: |
+          set -euo pipefail
+          APP="${GITHUB_REPOSITORY##*/}"
+          dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
+          "${dr[@]}" flox publish "$APP"
+          "${dr[@]}" flox install "$OWNER/$APP" -d deploy
+          "${dr[@]}" flox push -d deploy --owner "$OWNER" --force
+
+      # Pull the apricaut App credentials from Doppler (no GitHub-stored secrets).
+      # The private key is masked line-by-line before it ever reaches a step output.
+      - name: Read apricaut App creds from Doppler
+        id: app
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+        run: |
+          set -euo pipefail
+          ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          echo "::add-mask::$ID"
+          echo "app-id=$ID" >> "$GITHUB_OUTPUT"
+          KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
+          { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${GITOPS_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      # Mint a short-lived token from the apricaut GitHub App, scoped to the gitops
+      # repo. The App is installed there with write access (the personal PAT was not,
+      # which is the 403 this replaces). The action does the JWT signing for us.
+      - name: Mint apricaut App token
+        id: token
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.app.outputs.app-id }}
+          private-key: ${{ steps.app.outputs.private-key }}
+          owner: ${{ steps.app.outputs.owner }}
+          repositories: ${{ steps.app.outputs.repo }}
+
+      - name: Promote to the cluster (open + auto-merge a deploy PR)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # `flox push` updated FloxHub, but ArgoCD watches Git, not FloxHub, and the
+        # pod only re-pulls its environment on restart. The in-cluster flox shim
+        # accepts ONLY a plain owner/name ref in flox.dev/environment (a generation
+        # like owner/name/2 CrashLoops the pod), so we DON'T touch that — we bump a
+        # flox.dev/revision annotation (a pod-template change ArgoCD rolls on),
+        # which makes the pod re-pull the latest published environment.
+        env:
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          APP="${GITHUB_REPOSITORY##*/}"
+
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
+          cd gitops
+          DEPLOY="apps/$APP/base/deployment.yaml"
+          # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
+          # jq can't parse it (jq: parse error: Invalid numeric literal).
+          SHA="$GITHUB_SHA" yq -i \
+            '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
+            "$DEPLOY"
+          if git diff --quiet -- "$DEPLOY"; then
+            echo "revision unchanged; nothing to promote"; exit 0
+          fi
+
+          BRANCH="deploy/$APP/${GITHUB_SHA:0:7}"
+          git config user.name "$APP-ci"
+          git config user.email "ci@apricaut.com"
+          git checkout -b "$BRANCH"
+          git commit -am "deploy($APP): roll to ${GITHUB_SHA:0:7}"
+          git push origin "$BRANCH"
+
+          gh pr create --repo "$GITOPS_REPO" --base main --head "$BRANCH" \
+            --title "deploy($APP): roll to ${GITHUB_SHA:0:7}" \
+            --body "Automated promotion from $APP@${GITHUB_SHA:0:7}. Bumps flox.dev/revision so ArgoCD rolls the pod onto the latest published FloxHub environment."
+
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "$BRANCH" --repo "$GITOPS_REPO" --squash --delete-branch; then
+              echo "promotion PR merged"; exit 0
+            fi
+            echo "merge not ready (attempt ${attempt}); retrying..."; sleep 5
+          done
+          echo "failed to merge promotion PR" >&2; exit 1

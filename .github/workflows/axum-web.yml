@@ -1,0 +1,25 @@
+name: axum-web
+
+# Framework wrapper: an axum (server-only, e.g. askama/htmx) app -> flox -> cluster.
+# Thin entry point so apps reference a framework-named workflow:
+#
+#   jobs:
+#     ci:
+#       uses: apricaut/flox-ci/.github/workflows/axum-web.yml@v1
+#       secrets: inherit
+#
+# All logic lives in _flox-ci.yml; this only presets framework=axum (no wasm
+# client, so lint/test is a single host-target pass instead of the dioxus split).
+on:
+  workflow_call:
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token scoped to the shared CI config (FloxHub + deploy)"
+        required: true
+
+jobs:
+  ci:
+    uses: apricaut/flox-ci/.github/workflows/_flox-ci.yml@v1
+    with:
+      framework: axum
+    secrets: inherit
