@@ -195,10 +195,11 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
           cd gitops
           DEPLOY="apps/$APP/base/deployment.yaml"
-          jq -c --arg sha "$GITHUB_SHA" \
-            '.spec.template.metadata.annotations["flox.dev/revision"] = $sha' \
-            "$DEPLOY" > "$DEPLOY.tmp"
-          mv "$DEPLOY.tmp" "$DEPLOY"
+          # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
+          # jq can't parse it (jq: parse error: Invalid numeric literal).
+          SHA="$GITHUB_SHA" yq -i \
+            '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
+            "$DEPLOY"
           if git diff --quiet -- "$DEPLOY"; then
             echo "revision unchanged; nothing to promote"; exit 0
           fi
