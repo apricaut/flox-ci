@@ -14,7 +14,7 @@ on:
     secrets:
       DOPPLER_TOKEN:
         description: "Doppler token scoped to the shared CI config (FloxHub + deploy)"
-        required: true
+        required: false # PR runs (incl. Dependabot, which has no Actions secrets) never use it
 
 jobs:
   ci:
