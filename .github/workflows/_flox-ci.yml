@@ -43,8 +43,8 @@ on:
         default: dioxus
     secrets:
       DOPPLER_TOKEN:
-        description: "Doppler token scoped to <doppler_project>/<doppler_config>"
-        required: true
+        description: "Doppler token scoped to <doppler_project>/<doppler_config>. Only the push-to-main publish/promote steps use it, so it's optional: Dependabot-triggered PR runs don't receive Actions secrets and must still be able to lint+test."
+        required: false
 
 env:
   # Compile against the committed .sqlx cache, so fmt/clippy/check need no DB.
