@@ -102,6 +102,12 @@ jobs:
           restore-keys: |
             flox-${{ runner.os }}-
       - uses: flox/install-flox-action@v2
+      # Apps compose the shared toolchain env (apricaut/flox-environments ->
+      # FloxHub). Remote includes need explicit trust on machines that aren't
+      # the env's owner — locally the owner is auto-trusted, so a missing
+      # trust line only ever fails here.
+      - name: Trust the shared toolchain env
+        run: flox config --set "trusted_environments.\"tyler-harpool/rust-toolchain\"" "trust"
       # Cache the Nix store (flox build outputs + toolchain + deps) via the free
       # GitHub Actions cache backend — `flox build` is a hermetic Nix build, so
       # unchanged builds become near-instant and changed ones reuse unchanged
