@@ -17,7 +17,7 @@ on:
 
 jobs:
   ci:
-    uses: apricaut/flox-ci/.github/workflows/_flox-ci.yml@v1
+    uses: ./.github/workflows/_flox-ci.yml # same-SHA as this wrapper — no internal tag to bump on release
     with:
       framework: dioxus
     secrets: inherit
