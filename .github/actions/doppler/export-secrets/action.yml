@@ -59,11 +59,14 @@ runs:
         fi
 
         json_file="$RUNNER_TEMP/doppler-secrets.json"
-        doppler secrets download "$json_file" \
+        doppler secrets download \
           --project "$project" \
           --config "$CONFIG_INPUT" \
           --token "$effective_token" \
-          --format json
+          --format json \
+          --no-file \
+          --no-fallback \
+          --silent > "$json_file"
 
         node - "$json_file" <<'NODE'
         const fs = require("fs");
