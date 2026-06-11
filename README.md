@@ -1,6 +1,9 @@
 # flox-ci
 
-Reusable Flox CI/CD for apricaut services: **build → publish package → push runtime env → promote**.
+Reusable CI/CD for apricaut services:
+- **Flox web/server delivery**: build → publish package → push runtime env → promote
+- **Tauri client releases**: reusable desktop, Android, and iOS workflows backed by Doppler
+- **Release management + validation**: reusable `release-please` and Rust/Postgres check workflows
 
 App repos call it from `.github/workflows/flox.yml`:
 
@@ -20,6 +23,71 @@ The pipeline derives the service name from the caller repo, builds the `[build.<
 Flox target (→ `tyler-harpool/<repo>`), pushes the `deploy/` runtime env, and promotes by
 bumping `flox.dev/revision` in `apricaut/apricaut`. Change the pipeline here; every product
 picks it up — no per-repo config drift.
+
+## Tauri release workflows
+
+App repos can keep thin caller workflows and delegate the real release logic here:
+
+```yaml
+jobs:
+  desktop:
+    uses: apricaut/flox-ci/.github/workflows/tauri-desktop.yml@main
+    with:
+      app_name: my-app
+      server_url: https://my-app.example.com
+      dx_version: 0.7.9
+      doppler_project: my-app
+      doppler_config: prd
+    secrets: inherit
+```
+
+There are matching reusable workflows for:
+- `.github/workflows/tauri-desktop.yml`
+- `.github/workflows/tauri-android.yml`
+- `.github/workflows/tauri-ios.yml`
+- `.github/workflows/release-please.yml`
+- `.github/workflows/rust-postgres-check.yml`
+
+These workflows assume GitHub only supplies `DOPPLER_TOKEN`; the Apple,
+Android, and Tauri signing secrets are read from Doppler at runtime.
+
+## Shared release-please
+
+App repos can keep a tiny `release-please.yml` trigger and delegate the token
+minting + release-please wiring here:
+
+```yaml
+jobs:
+  release-please:
+    uses: apricaut/flox-ci/.github/workflows/release-please.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    secrets: inherit
+```
+
+This workflow reads `APRICAUT_APP_ID` and `APRICAUT_APP_PRIVATE_KEY` from
+Doppler `platform/common`, mints an `apricaut-platform` installation token,
+and uses that token so release tags can fan out into downstream workflows.
+
+## Shared Rust + Postgres validation
+
+Repos whose tests need a disposable Postgres can keep only their triggers and
+repo-specific cargo commands locally:
+
+```yaml
+jobs:
+  ci:
+    uses: apricaut/flox-ci/.github/workflows/rust-postgres-check.yml@main
+    with:
+      postgres_user: my-app
+      postgres_password: my-app
+      postgres_db: my-app
+      postgres_health_cmd: pg_isready -U my-app
+      database_url: postgres://my-app:my-app@localhost:5432/my-app
+      test_command: cargo test -p my-app-shared --features server
+      check_command: cargo check -p my-app-server
+```
 
 ## axum services — `actions/axum/cicd`
 

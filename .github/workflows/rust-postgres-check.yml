@@ -1,0 +1,96 @@
+name: rust-postgres-check
+
+# Reusable validation workflow for Rust repos whose tests need a writable
+# Postgres instance. The caller supplies the actual test/check commands, while
+# the shared workflow owns the runner, cache, and database service wiring.
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner label"
+        type: string
+        default: ubuntu-22.04
+      rust_toolchain:
+        description: "Rust toolchain channel/version"
+        type: string
+        default: stable
+      cargo_term_color:
+        description: "CARGO_TERM_COLOR env value"
+        type: string
+        default: always
+      rust_backtrace:
+        description: "RUST_BACKTRACE env value"
+        type: string
+        default: short
+      database_url:
+        description: "DATABASE_URL exposed to the commands"
+        type: string
+        required: true
+      postgres_image:
+        description: "Postgres container image"
+        type: string
+        default: postgres:16-alpine
+      postgres_user:
+        description: "Postgres username"
+        type: string
+        required: true
+      postgres_password:
+        description: "Postgres password"
+        type: string
+        required: true
+      postgres_db:
+        description: "Postgres database name"
+        type: string
+        required: true
+      postgres_health_cmd:
+        description: "Postgres health check command"
+        type: string
+        default: pg_isready -U postgres
+      test_command:
+        description: "Shell command that runs the repo's tests"
+        type: string
+        required: true
+      check_command:
+        description: "Optional shell command for an extra compile/check step"
+        type: string
+        default: ""
+
+jobs:
+  ci:
+    runs-on: ${{ inputs.runs_on }}
+    services:
+      postgres:
+        image: ${{ inputs.postgres_image }}
+        env:
+          POSTGRES_USER: ${{ inputs.postgres_user }}
+          POSTGRES_PASSWORD: ${{ inputs.postgres_password }}
+          POSTGRES_DB: ${{ inputs.postgres_db }}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "${{ inputs.postgres_health_cmd }}"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      CARGO_TERM_COLOR: ${{ inputs.cargo_term_color }}
+      RUST_BACKTRACE: ${{ inputs.rust_backtrace }}
+      DATABASE_URL: ${{ inputs.database_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run test command
+        run: |
+          set -euo pipefail
+          ${{ inputs.test_command }}
+
+      - name: Run check command
+        if: ${{ inputs.check_command != '' }}
+        run: |
+          set -euo pipefail
+          ${{ inputs.check_command }}

@@ -16,8 +16,9 @@ name: _flox-ci
 # (no separate `flox build` — the impure cargo/dx build isn't Nix-cache-reused,
 # so a second invocation would just recompile the whole app).
 #
-# Client releases (desktop/ios/android) are a SEPARATE platform-organized family
-# (apricaut/app-ci) — signing + stores, not flox/k8s — and do NOT live here.
+# Client releases (desktop/ios/android) live in separate reusable workflows in
+# this repo (`tauri-*.yml`) — signing + stores, not flox/k8s — and do NOT use
+# this server publish pipeline.
 on:
   workflow_call:
     inputs:

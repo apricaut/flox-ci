@@ -1,0 +1,70 @@
+name: doppler-export-secrets
+description: >-
+  Export selected Doppler secrets into GITHUB_ENV so later workflow steps can
+  consume them like ordinary environment variables.
+
+inputs:
+  token:
+    description: Doppler token authorized to read the target project/config.
+    required: true
+  project:
+    description: Doppler project to read from. Blank defaults to the caller repo name.
+    required: false
+    default: ""
+  config:
+    description: Doppler config to read from.
+    required: false
+    default: prd
+  keys:
+    description: Newline-delimited secret names to export.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: dopplerhq/cli-action@v3
+
+    - name: Export requested secrets
+      shell: bash
+      env:
+        DOPPLER_TOKEN: ${{ inputs.token }}
+        PROJECT_INPUT: ${{ inputs.project }}
+        CONFIG_INPUT: ${{ inputs.config }}
+        SECRET_KEYS: ${{ inputs.keys }}
+      run: |
+        set -euo pipefail
+
+        project="${PROJECT_INPUT:-}"
+        if [ -z "$project" ]; then
+          project="${GITHUB_REPOSITORY##*/}"
+        fi
+
+        json_file="$RUNNER_TEMP/doppler-secrets.json"
+        doppler secrets download "$json_file" \
+          --project "$project" \
+          --config "$CONFIG_INPUT" \
+          --format json
+
+        node - "$json_file" <<'NODE'
+        const fs = require("fs");
+
+        const jsonPath = process.argv[2];
+        const envPath = process.env.GITHUB_ENV;
+        const keys = (process.env.SECRET_KEYS || "")
+          .split(/\r?\n/)
+          .map((key) => key.trim())
+          .filter(Boolean);
+        const values = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+
+        for (const key of keys) {
+          const value = values[key] ?? "";
+          if (value) {
+            for (const line of String(value).split(/\r?\n/)) {
+              if (line) {
+                console.log(`::add-mask::${line}`);
+              }
+            }
+          }
+          fs.appendFileSync(envPath, `${key}<<__DOPPLER__\n${value}\n__DOPPLER__\n`);
+        }
+        NODE

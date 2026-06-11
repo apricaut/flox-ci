@@ -1,0 +1,78 @@
+name: release-please
+
+# Reusable release-please workflow for app repos. It reads the apricaut GitHub
+# App credentials from Doppler, mints a short-lived installation token, and
+# uses that token so the resulting release PR merge can fan out into other
+# tag-triggered workflows.
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        description: "Path to the caller repo's release-please config file"
+        type: string
+        default: release-please-config.json
+      manifest_file:
+        description: "Path to the caller repo's release-please manifest file"
+        type: string
+        default: .release-please-manifest.json
+      doppler_project:
+        description: "Doppler project holding the apricaut GitHub App credentials"
+        type: string
+        default: platform
+      doppler_config:
+        description: "Doppler config holding the apricaut GitHub App credentials"
+        type: string
+        default: common
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token that can read the shared apricaut GitHub App credentials"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: dopplerhq/cli-action@v3
+
+      - name: Read apricaut GitHub App creds from Doppler
+        id: app
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+        run: |
+          set -euo pipefail
+          app_id="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          echo "::add-mask::$app_id"
+          echo "app-id=$app_id" >> "$GITHUB_OUTPUT"
+
+          key="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$key"
+          {
+            echo "private-key<<__PEM__"
+            printf '%s\n' "$key"
+            echo "__PEM__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint apricaut GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.app.outputs.app-id }}
+          private-key: ${{ steps.app.outputs.private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: ${{ inputs.config_file }}
+          manifest-file: ${{ inputs.manifest_file }}
+          token: ${{ steps.app-token.outputs.token }}

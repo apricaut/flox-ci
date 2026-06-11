@@ -1,0 +1,183 @@
+name: tauri-android
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: App slug used in release names and asset labels.
+        type: string
+        default: ""
+      server_url:
+        description: URL baked into the WASM client for API calls.
+        type: string
+        required: true
+      dx_version:
+        description: Dioxus CLI version matching the app's Cargo.toml pin.
+        type: string
+        required: true
+      tauri_cli_version:
+        description: cargo-tauri version for the Android build.
+        type: string
+        default: "2.11.2"
+      tauri_workdir:
+        description: Directory containing tauri.conf.json and the Tauri crate.
+        type: string
+        default: src-tauri
+      release_label:
+        description: Optional explicit release label for manual reruns.
+        type: string
+        default: ""
+      ndk_version:
+        description: Android NDK version to install.
+        type: string
+        default: "26.1.10909125"
+      doppler_project:
+        description: Doppler project holding release secrets. Blank defaults to the repo name.
+        type: string
+        default: ""
+      doppler_config:
+        description: Doppler config holding release secrets.
+        type: string
+        default: prd
+    secrets:
+      DOPPLER_TOKEN:
+        description: Doppler token used to read the app release secrets.
+        required: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve app metadata
+        id: meta
+        shell: bash
+        run: |
+          app_name='${{ inputs.app_name }}'
+          doppler_project='${{ inputs.doppler_project }}'
+          if [ -z "$app_name" ]; then
+            app_name="${GITHUB_REPOSITORY##*/}"
+          fi
+          if [ -z "$doppler_project" ]; then
+            doppler_project="${GITHUB_REPOSITORY##*/}"
+          fi
+          echo "app_name=$app_name" >> "$GITHUB_OUTPUT"
+          echo "doppler_project=$doppler_project" >> "$GITHUB_OUTPUT"
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${{ inputs.ndk_version }}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${{ inputs.ndk_version }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ inputs.ndk_version }}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./${{ inputs.tauri_workdir }} -> target
+
+      - name: Install dx CLI
+        run: curl -sSL https://dioxus.dev/install.sh | bash -s v${{ inputs.dx_version }}
+
+      - name: Install cargo-tauri v2
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/cargo-tauri.tgz \
+            https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${{ inputs.tauri_cli_version }}/cargo-tauri-x86_64-unknown-linux-gnu.tgz
+          tar -xzf /tmp/cargo-tauri.tgz -C "$HOME/.cargo/bin" cargo-tauri
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
+          cargo-tauri --version
+
+      - uses: apricaut/flox-ci/.github/actions/doppler/export-secrets@main
+        with:
+          token: ${{ secrets.DOPPLER_TOKEN }}
+          project: ${{ steps.meta.outputs.doppler_project }}
+          config: ${{ inputs.doppler_config }}
+          keys: |
+            ANDROID_KEYSTORE_BASE64
+            ANDROID_KEYSTORE_PASSWORD
+            ANDROID_KEY_ALIAS
+
+      - name: Flag available Android signing secrets
+        id: secret_flags
+        shell: bash
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "has_android_keystore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_android_keystore=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write keystore for release signing
+        if: steps.secret_flags.outputs.has_android_keystore == 'true'
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/upload-keystore.jks"
+          cat > ${{ inputs.tauri_workdir }}/gen/android/keystore.properties <<EOF
+          keyAlias=${ANDROID_KEY_ALIAS:-stratagma}
+          password=$ANDROID_KEYSTORE_PASSWORD
+          storeFile=$RUNNER_TEMP/upload-keystore.jks
+          EOF
+
+      - name: Build Android bundle (AAB if signed, debug APK otherwise)
+        working-directory: ${{ inputs.tauri_workdir }}
+        env:
+          SERVER_URL: ${{ inputs.server_url }}
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            cargo tauri android build --aab
+          else
+            cargo tauri android build --apk --debug
+          fi
+
+      - name: Resolve release tag
+        id: rel
+        env:
+          INPUT_TAG: ${{ inputs.release_label }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="dev-${GITHUB_SHA:0:7}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Stage AAB/APK for release
+        run: |
+          set -euo pipefail
+          aab=$(find ${{ inputs.tauri_workdir }}/gen/android/app/build/outputs/bundle -name '*.aab' 2>/dev/null | head -1 || true)
+          apk=$(find ${{ inputs.tauri_workdir }}/gen/android/app/build/outputs/apk -name '*.apk' 2>/dev/null | head -1 || true)
+          mkdir -p release-assets
+          if [ -n "$aab" ]; then
+            cp "$aab" "release-assets/${{ steps.meta.outputs.app_name }}-${RELEASE_TAG}-android.aab"
+          elif [ -n "$apk" ]; then
+            cp "$apk" "release-assets/${{ steps.meta.outputs.app_name }}-${RELEASE_TAG}-android.apk"
+          else
+            echo "No AAB or APK found" && exit 1
+          fi
+        env:
+          RELEASE_TAG: ${{ steps.rel.outputs.tag }}
+
+      - name: Attach Android bundle to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: "${{ steps.meta.outputs.app_name }} ${{ steps.rel.outputs.tag }}"
+          draft: false
+          files: release-assets/*

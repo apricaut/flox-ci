@@ -1,0 +1,309 @@
+name: tauri-ios
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: App slug used in release names and asset labels.
+        type: string
+        default: ""
+      app_bundle_name:
+        description: .app bundle name inside the built IPA (without the .app suffix).
+        type: string
+        required: true
+      bundle_id:
+        description: Apple bundle identifier expected in App Store Connect and the provisioning profile.
+        type: string
+        required: true
+      server_url:
+        description: URL baked into the WASM client for API calls.
+        type: string
+        required: true
+      dx_version:
+        description: Dioxus CLI version matching the app's Cargo.toml pin.
+        type: string
+        required: true
+      tauri_cli_version:
+        description: cargo-tauri version for the iOS build.
+        type: string
+        default: "2.11.2"
+      tauri_workdir:
+        description: Directory containing tauri.conf.json and the Tauri crate.
+        type: string
+        default: src-tauri
+      release_label:
+        description: Optional explicit release label for manual reruns.
+        type: string
+        default: ""
+      doppler_project:
+        description: Doppler project holding release secrets. Blank defaults to the repo name.
+        type: string
+        default: ""
+      doppler_config:
+        description: Doppler config holding release secrets.
+        type: string
+        default: prd
+    secrets:
+      DOPPLER_TOKEN:
+        description: Doppler token used to read the app release secrets.
+        required: true
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve app metadata
+        id: meta
+        shell: bash
+        run: |
+          app_name='${{ inputs.app_name }}'
+          doppler_project='${{ inputs.doppler_project }}'
+          if [ -z "$app_name" ]; then
+            app_name="${GITHUB_REPOSITORY##*/}"
+          fi
+          if [ -z "$doppler_project" ]; then
+            doppler_project="${GITHUB_REPOSITORY##*/}"
+          fi
+          echo "app_name=$app_name" >> "$GITHUB_OUTPUT"
+          echo "doppler_project=$doppler_project" >> "$GITHUB_OUTPUT"
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Remove Xcode MetalToolchain asset (swift-compat workaround)
+        run: |
+          sudo rm -rf /System/Library/AssetsV2/com_apple_MobileAsset_MetalToolchain
+          echo "TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault" >> $GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./${{ inputs.tauri_workdir }} -> target
+          prefix-key: v1-xcode26
+
+      - name: Install dx CLI
+        run: curl -sSL https://dioxus.dev/install.sh | bash -s v${{ inputs.dx_version }}
+
+      - name: Install cargo-tauri v2
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/cargo-tauri.zip \
+            https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${{ inputs.tauri_cli_version }}/cargo-tauri-aarch64-apple-darwin.zip
+          unzip -o /tmp/cargo-tauri.zip cargo-tauri -d "$HOME/.cargo/bin"
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
+          cargo-tauri --version
+
+      - uses: apricaut/flox-ci/.github/actions/doppler/export-secrets@main
+        with:
+          token: ${{ secrets.DOPPLER_TOKEN }}
+          project: ${{ steps.meta.outputs.doppler_project }}
+          config: ${{ inputs.doppler_config }}
+          keys: |
+            APPLE_API_ISSUER
+            APPLE_API_KEY_ID
+            APPLE_API_KEY
+            IOS_CERTIFICATE
+            IOS_CERTIFICATE_PASSWORD
+            IOS_MOBILE_PROVISION
+            KEYCHAIN_PASSWORD
+
+      - name: Flag available iOS signing secrets
+        id: secret_flags
+        shell: bash
+        run: |
+          if [ -n "${APPLE_API_ISSUER:-}" ]; then
+            echo "has_apple_api=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_apple_api=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${IOS_CERTIFICATE:-}" ]; then
+            echo "has_ios_signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_ios_signing=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preflight — validate App Store Connect API key
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        run: |
+          set -euo pipefail
+          KEY="$RUNNER_TEMP/preflight_AuthKey.p8"
+          echo "$APPLE_API_KEY" | base64 --decode > "$KEY"
+          if ! openssl pkey -in "$KEY" -noout 2>/dev/null; then
+            echo "::error::APPLE_API_KEY does not decode to a valid PEM private key."
+            exit 1
+          fi
+          b64url() { openssl base64 -A | tr -d '=' | tr '/+' '_-'; }
+          NOW=$(date +%s); EXP=$((NOW + 600))
+          HEADER=$(printf '{"alg":"ES256","kid":"%s","typ":"JWT"}' "$APPLE_API_KEY_ID" | b64url)
+          PAYLOAD=$(printf '{"iss":"%s","iat":%s,"exp":%s,"aud":"appstoreconnect-v1"}' "$APPLE_API_ISSUER" "$NOW" "$EXP" | b64url)
+          SIGNING_INPUT="${HEADER}.${PAYLOAD}"
+          DER="$RUNNER_TEMP/sig.der"
+          printf '%s' "$SIGNING_INPUT" | openssl dgst -sha256 -sign "$KEY" -out "$DER"
+          RS=$(openssl asn1parse -inform DER -in "$DER" \
+            | awk -F: '/INTEGER/ {print $NF}' \
+            | while read hex; do
+                if [ ${#hex} -eq 66 ] && [ "${hex:0:2}" = "00" ]; then hex="${hex:2}"; fi
+                printf "%064s" "$hex" | tr ' ' '0'
+              done | tr -d '\n')
+          RAW_SIG=$(printf '%s' "$RS" | xxd -r -p | b64url)
+          JWT="${SIGNING_INPUT}.${RAW_SIG}"
+          STATUS=$(curl -s -o "$RUNNER_TEMP/asc_body" -w "%{http_code}" \
+            -H "Authorization: Bearer $JWT" \
+            "https://api.appstoreconnect.apple.com/v1/apps?limit=200")
+          rm -f "$KEY" "$DER"
+          echo "App Store Connect responded HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::App Store Connect rejected the API key (HTTP $STATUS)."
+            sed 's/^/  /' "$RUNNER_TEMP/asc_body"
+            exit 1
+          fi
+          echo "API key OK — apps visible to this key:"
+          if command -v jq >/dev/null 2>&1; then
+            jq -r '.data[]?.attributes | "  - \(.bundleId) (\(.name))"' "$RUNNER_TEMP/asc_body" || cat "$RUNNER_TEMP/asc_body"
+            if ! jq -e --arg bundle_id "${{ inputs.bundle_id }}" '.data[]?.attributes.bundleId | select(. == $bundle_id)' \
+              "$RUNNER_TEMP/asc_body" >/dev/null 2>&1; then
+              echo "::error::API key cannot see ${{ inputs.bundle_id }} in App Store Connect."
+              exit 1
+            fi
+            echo "Confirmed: API key has access to ${{ inputs.bundle_id }}"
+          else
+            cat "$RUNNER_TEMP/asc_body"
+          fi
+
+      - name: Import Apple iOS distribution certificate
+        if: steps.secret_flags.outputs.has_ios_signing == 'true'
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
+          echo "$IOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/cert.p12
+          echo "$IOS_MOBILE_PROVISION" | base64 --decode > $RUNNER_TEMP/profile.mobileprovision
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
+          security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN_PATH" -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $RUNNER_TEMP/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+
+          echo "::group::Imported cert + profile diagnostics"
+          echo "Signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+          echo "Provisioning profile contents:"
+          PROF_PLIST=$(mktemp)
+          security cms -D -i $RUNNER_TEMP/profile.mobileprovision > "$PROF_PLIST" 2>/dev/null || true
+          for k in Name UUID TeamIdentifier TeamName ApplicationIdentifierPrefix ExpirationDate; do
+            v=$(/usr/libexec/PlistBuddy -c "Print :$k" "$PROF_PLIST" 2>/dev/null || true)
+            [ -n "$v" ] && echo "  $k = $v"
+          done
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$PROF_PLIST" 2>/dev/null || true)
+          echo "  application-identifier = $APP_ID"
+          if [ -n "$APP_ID" ] && ! echo "$APP_ID" | grep -q '${{ inputs.bundle_id }}$'; then
+            echo "::warning::Provisioning profile is for '$APP_ID' but the app's bundle ID is ${{ inputs.bundle_id }}."
+          fi
+          rm -f "$PROF_PLIST"
+          echo "::endgroup::"
+
+          rm $RUNNER_TEMP/cert.p12 $RUNNER_TEMP/profile.mobileprovision
+
+      - name: Skip note (no Apple API key configured)
+        if: steps.secret_flags.outputs.has_apple_api != 'true'
+        run: |
+          echo "::notice::APPLE_API_ISSUER not set — skipping iOS build."
+
+      - name: Ensure iOS assets folder exists (xcodegen requires the path)
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        working-directory: ${{ inputs.tauri_workdir }}
+        run: mkdir -p gen/apple/assets
+
+      - name: Build iOS IPA (App Store Connect signing)
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        working-directory: ${{ inputs.tauri_workdir }}
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+          SERVER_URL: ${{ inputs.server_url }}
+        run: |
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          cargo tauri ios build --export-method app-store-connect
+
+      - name: Override CFBundleVersion to keep App Store Connect uploads unique
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        working-directory: ${{ inputs.tauri_workdir }}
+        run: |
+          set -euo pipefail
+          IPA_REL=$(find gen/apple/build -name '*.ipa' | head -1)
+          [ -n "$IPA_REL" ] || { echo "::error::No IPA produced by cargo tauri ios build"; exit 1; }
+          IPA=$(cd "$(dirname "$IPA_REL")" && pwd)/$(basename "$IPA_REL")
+          BASE=$(jq -r '.version' tauri.conf.json)
+          BUILD="${BASE}.${GITHUB_RUN_NUMBER}"
+          WORK=$(mktemp -d)
+          unzip -q "$IPA" -d "$WORK"
+          APP="$WORK/Payload/${{ inputs.app_bundle_name }}.app"
+          [ -d "$APP" ] || { echo "::error::${{ inputs.app_bundle_name }}.app not found inside $IPA"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD}" "$APP/Info.plist"
+          IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Distribution/ {print $2; exit}')
+          [ -n "$IDENTITY" ] || { echo "::error::No Apple Distribution identity in keychain"; exit 1; }
+          codesign --force --sign "$IDENTITY" \
+            --preserve-metadata=entitlements,flags,runtime \
+            "$APP"
+          codesign --verify --deep --strict "$APP"
+          rm "$IPA"
+          (cd "$WORK" && zip -qrX "$IPA" Payload)
+          echo "IPA rebuilt with CFBundleVersion=${BUILD} (CFBundleShortVersionString=${BASE}, signed by: ${IDENTITY})"
+
+      - name: Resolve release tag
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        id: rel
+        env:
+          INPUT_TAG: ${{ inputs.release_label }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="dev-${GITHUB_SHA:0:7}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Stage IPA for release
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          src=$(find ${{ inputs.tauri_workdir }}/gen/apple/build -name '*.ipa' | head -1)
+          test -n "$src" && test -f "$src"
+          mkdir -p release-assets
+          cp "$src" "release-assets/${{ steps.meta.outputs.app_name }}-${RELEASE_TAG}-ios.ipa"
+
+      - name: Attach IPA to GitHub Release
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: "${{ steps.meta.outputs.app_name }} ${{ steps.rel.outputs.tag }}"
+          draft: false
+          files: release-assets/*.ipa
+
+      - name: Upload to TestFlight
+        if: steps.secret_flags.outputs.has_apple_api == 'true'
+        run: |
+          KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEY_DIR"
+          KEY_FILE="$KEY_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "$APPLE_API_KEY" | base64 --decode > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          IPA=$(find ${{ inputs.tauri_workdir }}/gen/apple/build -name '*.ipa' | head -1)
+          xcrun altool --upload-app --type ios --file "$IPA" --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
+          rm -f "$KEY_FILE"
