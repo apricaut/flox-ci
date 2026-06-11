@@ -58,36 +58,34 @@ runs:
           effective_token="$app_token"
         fi
 
-        json_file="$RUNNER_TEMP/doppler-secrets.json"
-        doppler secrets download \
-          --project "$project" \
-          --config "$CONFIG_INPUT" \
-          --token "$effective_token" \
-          --format json \
-          --no-file \
-          --no-fallback \
-          --silent > "$json_file"
+        while IFS= read -r key; do
+          key="$(printf '%s' "$key" | tr -d '\r')"
+          if [ -z "$key" ]; then
+            continue
+          fi
 
-        node - "$json_file" <<'NODE'
-        const fs = require("fs");
+          value="$(doppler secrets get "$key" \
+            --project "$project" \
+            --config "$CONFIG_INPUT" \
+            --token "$effective_token" \
+            --plain 2>/dev/null || true)"
 
-        const jsonPath = process.argv[2];
-        const envPath = process.env.GITHUB_ENV;
-        const keys = (process.env.SECRET_KEYS || "")
-          .split(/\r?\n/)
-          .map((key) => key.trim())
-          .filter(Boolean);
-        const values = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+          if [ -n "$value" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                echo "::add-mask::$line"
+              fi
+            done <<EOF
+$value
+EOF
+          fi
 
-        for (const key of keys) {
-          const value = values[key] ?? "";
-          if (value) {
-            for (const line of String(value).split(/\r?\n/)) {
-              if (line) {
-                console.log(`::add-mask::${line}`);
-              }
-            }
-          }
-          fs.appendFileSync(envPath, `${key}<<__DOPPLER__\n${value}\n__DOPPLER__\n`);
-        }
-        NODE
+          delimiter="__DOPPLER_${key}_$(date +%s)_$RANDOM__"
+          {
+            printf '%s<<%s\n' "$key" "$delimiter"
+            printf '%s\n' "$value"
+            printf '%s\n' "$delimiter"
+          } >> "$GITHUB_ENV"
+        done <<EOF
+$SECRET_KEYS
+EOF
