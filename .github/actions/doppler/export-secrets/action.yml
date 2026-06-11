@@ -44,7 +44,7 @@ runs:
 
         effective_token="$DOPPLER_TOKEN"
         if [ "$project" != "platform" ]; then
-          token_key="$(printf '%s_DOPPLER_TOKEN' "${project^^}" | tr '-' '_')"
+          token_key="$(printf '%s' "$project" | tr '[:lower:]-' '[:upper:]_')_DOPPLER_TOKEN"
           app_token="$(doppler secrets get "$token_key" \
             --project platform \
             --config common \
