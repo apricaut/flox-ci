@@ -219,6 +219,16 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
           cd gitops
           DEPLOY="apps/$APP/base/deployment.yaml"
+          # A brand-new service's first publish always races the new-service
+          # run: this push fires the moment the code repo is created, but
+          # apps/<name>/ only lands on gitops main when the deploy PR merges.
+          # Nothing is lost by skipping — the initial ArgoCD sync starts the
+          # pod against the latest published env, and the next app push (or a
+          # re-run) promotes normally.
+          if [ ! -f "$DEPLOY" ]; then
+            echo "$DEPLOY not on $GITOPS_REPO main yet (deploy PR unmerged?); skipping promote"
+            exit 0
+          fi
           # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
           # jq can't parse it (jq: parse error: Invalid numeric literal).
           SHA="$GITHUB_SHA" yq -i \
