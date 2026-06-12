@@ -1,0 +1,68 @@
+name: claude
+
+# Reusable @claude responder: mention @claude in an issue or PR comment and
+# Claude Code handles it (answers questions, pushes fixes to a claude/* branch,
+# reviews diffs). Apps call this so the wiring changes in one place:
+#
+#   jobs:
+#     claude:
+#       if: contains(github.event.comment.body, '@claude') || ...
+#       uses: apricaut/flox-ci/.github/workflows/claude.yml@main
+#       secrets: inherit
+#
+# Auth follows the platform's one-bootstrap-secret pattern: the only GitHub
+# secret needed is DOPPLER_TOKEN; CLAUDE_CODE_OAUTH_TOKEN (a Claude Max
+# subscription token minted with `claude setup-token`, valid one year) lives
+# in Doppler platform/common. NOTE: it draws on the Max subscription's rate
+# limits — heavy automation can starve interactive use; switch the Doppler
+# key to an API key + `anthropic_api_key` input if that starts to bite.
+#
+# GitHub-side auth uses the workflow's own GITHUB_TOKEN (the Claude GitHub
+# App is not installed on the org), so Claude's comments appear as
+# github-actions[bot] and the CALLER must grant write permissions:
+#
+#   permissions:
+#     contents: write        # push fix branches
+#     pull-requests: write   # comment on / open PRs
+#     issues: write          # comment on issues
+#     actions: read          # inspect CI results on the PR
+#     id-token: write        # action's OIDC plumbing
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: "Optional extra instructions appended to Claude's run (e.g. repo conventions)"
+        type: string
+        default: ""
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token able to read platform/common (CLAUDE_CODE_OAUTH_TOKEN)"
+        required: true
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: dopplerhq/cli-action@v3
+
+      - name: Read Claude OAuth token from Doppler
+        id: auth
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          T="$(doppler secrets get CLAUDE_CODE_OAUTH_TOKEN --project platform --config common --plain)"
+          echo "::add-mask::$T"
+          echo "token=$T" >> "$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ steps.auth.outputs.token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: ${{ inputs.prompt }}
