@@ -215,8 +215,23 @@ jobs:
           set -euo pipefail
           APP="${GITHUB_REPOSITORY##*/}"
 
-          git clone --depth 1 \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops
+          # A brand-new service repo makes GitHub re-evaluate the App
+          # installation; for a brief window the freshly minted token can't see
+          # the GitOps repo and the clone fails with "Repository not found"
+          # (exit 128). Retry so a new app's first deploy doesn't flake while
+          # the installation token propagates.
+          for attempt in 1 2 3 4 5; do
+            if git clone --depth 1 \
+                "https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git" gitops; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "clone of $GITOPS_REPO failed after $attempt attempts (token propagation?)" >&2
+              exit 1
+            fi
+            echo "clone failed (attempt ${attempt}); App token may still be propagating; retrying..."
+            sleep 10
+          done
           cd gitops
           DEPLOY="apps/$APP/base/deployment.yaml"
           # A brand-new service's first publish always races the new-service
