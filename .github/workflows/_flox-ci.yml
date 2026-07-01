@@ -62,6 +62,10 @@ env:
   # Don't abort a 25-min build on a transient crates.io blip.
   CARGO_NET_RETRY: "10"
   RUST_BACKTRACE: "1"
+  # Fetch git deps via the git CLI (not libgit2), so private apricaut crates
+  # resolve through the `url.insteadOf` + App-token auth configured below.
+  # libgit2 doesn't reliably honor gitconfig insteadOf/credential settings.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   ci:
@@ -86,6 +90,50 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # publish requires the pushed revision
+
+      # Private cargo git deps (apricaut-ui, apricaut-billing-ui, …) live in
+      # private org repos. The checkout GITHUB_TOKEN can't clone ACROSS repos, so
+      # mint an apricaut App token (all-repos) and point git at it for org clones
+      # — BEFORE any cargo step. Without this, private deps only resolve when a
+      # warm ~/.cargo/git cache already holds them; a NEW private dep fails with
+      # "failed to authenticate". Skipped when Doppler creds aren't available
+      # (fork/Dependabot PRs), which only compile-check already-cached deps.
+      - name: Install Doppler CLI (private-dep auth)
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+      - name: Read apricaut App creds from Doppler
+        id: depapp
+        if: env.DOPPLER_TOKEN != ''
+        env:
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+        run: |
+          set -euo pipefail
+          ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          echo "::add-mask::$ID"
+          echo "app-id=$ID" >> "$GITHUB_OUTPUT"
+          KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
+          { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+      - name: Mint apricaut App token for private cargo deps
+        id: deptoken
+        if: env.DOPPLER_TOKEN != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.depapp.outputs.app-id }}
+          private-key: ${{ steps.depapp.outputs.private-key }}
+          owner: apricaut
+          # no `repositories:` → the token covers every repo the App can access,
+          # so any private apricaut crate resolves with no per-repo bookkeeping.
+      - name: Authenticate git for private apricaut cargo deps
+        if: env.DOPPLER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ steps.deptoken.outputs.token }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/apricaut/".insteadOf \
+            "https://github.com/apricaut/"
+
       # Rust compile cache — registry + target dir, so PRs don't cold-compile
       # every dependency. The toolchain itself needs no cache: flox pulls the
       # locked env from its binary cache in ~30s.
