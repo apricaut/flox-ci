@@ -153,7 +153,11 @@ jobs:
       # the env's owner — locally the owner is auto-trusted, so a missing
       # trust line only ever fails here.
       - name: Trust the shared toolchain env
-        run: flox config --set "trusted_environments.\"tyler-harpool/rust-toolchain\"" "trust"
+        # tyler-harpool entry stays until every app's [include] is flipped to
+        # the apricaut copy.
+        run: |
+          flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
+          flox config --set "trusted_environments.\"tyler-harpool/rust-toolchain\"" "trust"
 
       - name: Lint + test inside the Flox env
         # Correctness gate — runs on PRs only. A push to main is a merged PR that
