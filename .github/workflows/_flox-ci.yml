@@ -25,7 +25,7 @@ on:
       floxhub_owner:
         description: "FloxHub account the package + runtime env are published under"
         type: string
-        default: tyler-harpool
+        default: apricaut
       gitops_repo:
         description: "Repo holding apps/<name>/ deploy manifests to promote into"
         type: string
