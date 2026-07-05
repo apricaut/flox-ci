@@ -26,7 +26,7 @@ inputs:
   floxhub-owner:
     description: FloxHub owner the env is published under.
     required: false
-    default: tyler-harpool
+    default: apricaut
   deploy-repo:
     description: GitOps repo whose deploy manifest is bumped to promote.
     required: false

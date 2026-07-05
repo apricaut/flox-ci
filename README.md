@@ -20,7 +20,7 @@ jobs:
 ```
 
 The pipeline derives the service name from the caller repo, builds the `[build.<repo>]`
-Flox target (→ `tyler-harpool/<repo>`), pushes the `deploy/` runtime env, and promotes by
+Flox target (→ `apricaut/<repo>`), pushes the `deploy/` runtime env, and promotes by
 bumping `flox.dev/revision` in `apricaut/apricaut`. Change the pipeline here; every product
 picks it up — no per-repo config drift.
 
