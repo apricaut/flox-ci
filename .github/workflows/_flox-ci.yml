@@ -215,9 +215,24 @@ jobs:
           set -euo pipefail
           APP="${GITHUB_REPOSITORY##*/}"
           dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
-          "${dr[@]}" flox publish "$APP"
+          # -o is required: without it flox publishes to the token's PERSONAL
+          # catalog, ignoring the owner input entirely.
+          "${dr[@]}" flox publish -o "$OWNER" "$APP"
+          # `flox install` skips ids that are already installed, so an owner
+          # change (tyler-harpool -> apricaut) would never land — uninstall
+          # first to force a re-point at $OWNER's catalog.
+          "${dr[@]}" flox uninstall "$APP" -d deploy || true
           "${dr[@]}" flox install "$OWNER/$APP" -d deploy
-          "${dr[@]}" flox push -d deploy --owner "$OWNER" --force
+          # Binaries can lag catalog metadata right after publish ("Can't find
+          # download location"); retry while the upload settles.
+          for attempt in 1 2 3 4 5; do
+            if "${dr[@]}" flox push -d deploy --owner "$OWNER" --force; then
+              exit 0
+            fi
+            echo "deploy env push not ready (attempt ${attempt}); retrying…"
+            sleep 20
+          done
+          echo "failed to push deploy env to FloxHub" >&2; exit 1
 
       # Pull the apricaut App credentials from Doppler (no GitHub-stored secrets).
       # The private key is masked line-by-line before it ever reaches a step output.
