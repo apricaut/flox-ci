@@ -308,7 +308,21 @@ jobs:
           # pod against the latest published env, and the next app push (or a
           # re-run) promotes normally.
           if [ ! -f "$DEPLOY" ]; then
-            echo "$DEPLOY not on $GITOPS_REPO main yet (deploy PR unmerged?); skipping promote"
+            # First green build of a NEW service: apps/<name>/ lives on the
+            # unmerged new-service PR (head branch service/<app>/*). Auto-merge
+            # it so the service deploys on its first successful build instead of
+            # waiting for a human — the build just proved the env publishes.
+            NSPR=$(gh pr list --repo "$GITOPS_REPO" --state open --json number,headRefName \
+              -q ".[] | select(.headRefName | startswith(\"service/$APP/\")) | .number" | head -1)
+            if [ -n "$NSPR" ]; then
+              for attempt in 1 2 3 4 5; do
+                if gh pr merge "$NSPR" --repo "$GITOPS_REPO" --squash --delete-branch; then
+                  echo "first-build: auto-merged new-service PR #$NSPR"; exit 0
+                fi
+                echo "new-service PR merge not ready (attempt ${attempt}); retrying..."; sleep 5
+              done
+            fi
+            echo "$DEPLOY not on $GITOPS_REPO main yet and no open service/$APP PR; skipping promote"
             exit 0
           fi
           # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
