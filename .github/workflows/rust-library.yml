@@ -1,0 +1,55 @@
+name: rust-library
+
+# Reusable validation workflow for standalone Rust library crates.
+# App/service delivery stays in axum-web.yml and dioxus-web.yml; this workflow
+# is intentionally validation-only so shared crates can consume it without
+# accidentally publishing a Flox package or promoting a deployment.
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner label"
+        type: string
+        default: ubuntu-24.04
+      rust_toolchain:
+        description: "Rust toolchain channel/version"
+        type: string
+        default: stable
+      working_directory:
+        description: "Directory containing Cargo.toml"
+        type: string
+        default: "."
+      cargo_scope:
+        description: "Optional cargo package/workspace scope, e.g. '--workspace' or '-p crate-name'"
+        type: string
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  ci:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working_directory }}
+
+      - name: Validate library crate
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          CARGO_SCOPE: ${{ inputs.cargo_scope }}
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy ${CARGO_SCOPE} --all-targets -- -D warnings
+          cargo test ${CARGO_SCOPE} --all-targets
+          cargo build ${CARGO_SCOPE}
