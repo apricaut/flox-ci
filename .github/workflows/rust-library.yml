@@ -23,6 +23,10 @@ on:
         description: "Optional cargo package/workspace scope, e.g. '--workspace' or '-p crate-name'"
         type: string
         default: ""
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Optional Doppler token used to mint an apricaut App token for private cargo git deps"
+        required: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,8 +36,49 @@ env:
 jobs:
   ci:
     runs-on: ${{ inputs.runs_on }}
+    env:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Doppler CLI (private-dep auth)
+        if: env.DOPPLER_TOKEN != ''
+        uses: dopplerhq/cli-action@v3
+
+      - name: Read apricaut App creds from Doppler
+        id: depapp
+        if: env.DOPPLER_TOKEN != ''
+        run: |
+          set -euo pipefail
+          id="$(doppler secrets get APRICAUT_APP_ID --project platform --config common --plain)"
+          echo "::add-mask::$id"
+          echo "app-id=$id" >> "$GITHUB_OUTPUT"
+
+          key="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project platform --config common --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$key"
+          {
+            echo "private-key<<__PEM__"
+            printf '%s\n' "$key"
+            echo "__PEM__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint apricaut App token for private cargo deps
+        id: deptoken
+        if: env.DOPPLER_TOKEN != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.depapp.outputs.app-id }}
+          private-key: ${{ steps.depapp.outputs.private-key }}
+          owner: apricaut
+
+      - name: Authenticate git for private apricaut cargo deps
+        if: env.DOPPLER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ steps.deptoken.outputs.token }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/apricaut/".insteadOf \
+            "https://github.com/apricaut/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
