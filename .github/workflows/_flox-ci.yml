@@ -91,6 +91,29 @@ jobs:
         with:
           fetch-depth: 0 # publish requires the pushed revision
 
+      # Rust compile cache — registry + target dir, so PRs don't cold-compile
+      # every dependency. The toolchain itself needs no cache: flox pulls the
+      # locked env from its binary cache in ~30s.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.flox/env/manifest.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - uses: flox/install-flox-action@v2
+
+      # Apps compose shared toolchain envs from FloxHub. Remote includes need
+      # explicit trust on machines that aren't the env's owner — locally the
+      # owner is auto-trusted, so a missing trust line only ever fails here.
+      - name: Trust shared envs
+        run: |
+          flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
+          flox config --set "trusted_environments.\"apricaut/ci-toolchain\"" "trust"
+
       # Private cargo git deps (apricaut-ui, apricaut-billing-ui, …) live in
       # private org repos. The checkout GITHUB_TOKEN can't clone ACROSS repos, so
       # mint an apricaut App token (all-repos) and point git at it for org clones
@@ -98,9 +121,6 @@ jobs:
       # warm ~/.cargo/git cache already holds them; a NEW private dep fails with
       # "failed to authenticate". Skipped when Doppler creds aren't available
       # (fork/Dependabot PRs), which only compile-check already-cached deps.
-      - name: Install Doppler CLI (private-dep auth)
-        if: env.DOPPLER_TOKEN != ''
-        uses: dopplerhq/cli-action@v3
       - name: Read apricaut App creds from Doppler
         id: depapp
         if: env.DOPPLER_TOKEN != ''
@@ -108,13 +128,14 @@ jobs:
           DP_PROJECT: ${{ inputs.doppler_project }}
           DP_CONFIG: ${{ inputs.doppler_config }}
         run: |
-          set -euo pipefail
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
           echo "::add-mask::$ID"
           echo "app-id=$ID" >> "$GITHUB_OUTPUT"
           KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
           while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
           { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+          SCRIPT
       - name: Mint apricaut App token for private cargo deps
         id: deptoken
         if: env.DOPPLER_TOKEN != ''
@@ -133,31 +154,6 @@ jobs:
           git config --global \
             url."https://x-access-token:${GH_TOKEN}@github.com/apricaut/".insteadOf \
             "https://github.com/apricaut/"
-
-      # Rust compile cache — registry + target dir, so PRs don't cold-compile
-      # every dependency. The toolchain itself needs no cache: flox pulls the
-      # locked env from its binary cache in ~30s.
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.flox/env/manifest.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-      - uses: flox/install-flox-action@v2
-      # Apps compose the shared toolchain env (apricaut/flox-environments ->
-      # FloxHub). Remote includes need explicit trust on machines that aren't
-      # the env's owner — locally the owner is auto-trusted, so a missing
-      # trust line only ever fails here.
-      - name: Trust the shared toolchain env
-        # tyler-harpool entry stays until every app's [include] is flipped to
-        # the apricaut copy.
-        run: |
-          flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
-          flox config --set "trusted_environments.\"tyler-harpool/rust-toolchain\"" "trust"
 
       - name: Lint + test inside the Flox env
         # Correctness gate — runs on PRs only. A push to main is a merged PR that
@@ -195,9 +191,6 @@ jobs:
       # above; the release `dx bundle` is built once, at publish time, on main.
 
       # ---- everything below runs ONLY on push to main ----
-      - uses: dopplerhq/cli-action@v3
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
       - name: Publish package + push the runtime env to FloxHub
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         # 1. publish: BUILDS the target from a clean clone + publishes it ->
@@ -212,7 +205,7 @@ jobs:
           DP_PROJECT: ${{ inputs.doppler_project }}
           DP_CONFIG: ${{ inputs.doppler_config }}
         run: |
-          set -euo pipefail
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
           dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
           # -o is required: without it flox publishes to the token's PERSONAL
@@ -233,6 +226,7 @@ jobs:
             sleep 20
           done
           echo "failed to push deploy env to FloxHub" >&2; exit 1
+          SCRIPT
 
       # Pull the apricaut App credentials from Doppler (no GitHub-stored secrets).
       # The private key is masked line-by-line before it ever reaches a step output.
@@ -244,7 +238,7 @@ jobs:
           DP_CONFIG: ${{ inputs.doppler_config }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
         run: |
-          set -euo pipefail
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
           echo "::add-mask::$ID"
           echo "app-id=$ID" >> "$GITHUB_OUTPUT"
@@ -253,6 +247,7 @@ jobs:
           { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
           echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
           echo "repo=${GITOPS_REPO##*/}" >> "$GITHUB_OUTPUT"
+          SCRIPT
 
       # Mint a short-lived token from the apricaut GitHub App, scoped to the gitops
       # repo. The App is installed there with write access (the personal PAT was not,
@@ -279,7 +274,7 @@ jobs:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          set -euo pipefail
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
 
           # A brand-new service repo makes GitHub re-evaluate the App
@@ -352,3 +347,4 @@ jobs:
             echo "merge not ready (attempt ${attempt}); retrying..."; sleep 5
           done
           echo "failed to merge promotion PR" >&2; exit 1
+          SCRIPT
