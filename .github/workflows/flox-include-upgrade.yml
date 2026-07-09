@@ -24,15 +24,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - uses: flox/install-flox-action@v2
-      - uses: dopplerhq/cli-action@v3
+
+      - name: Trust shared envs
+        run: |
+          flox config --set "trusted_environments.\"apricaut/ci-toolchain\"" "trust"
 
       - name: Read apricaut GitHub App creds from Doppler
         id: app
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
         run: |
-          set -euo pipefail
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           dr=(doppler run --project platform --config common --)
           app_id="$("${dr[@]}" bash -c 'echo "$APRICAUT_APP_ID"')"
           echo "::add-mask::$app_id"
@@ -44,6 +48,7 @@ jobs:
             printf '%s\n' "$key"
             echo "__PEM__"
           } >> "$GITHUB_OUTPUT"
+          SCRIPT
 
       - name: Mint GitHub App token
         id: app-token
@@ -53,19 +58,22 @@ jobs:
           private-key: ${{ steps.app.outputs.private-key }}
           owner: apricaut
 
+      - name: Resolve changed envs
+        id: envs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "list=${{ github.event.client_payload.envs }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${{ github.event.inputs.envs }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Discover and upgrade consumer repos
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          ENVS: ${{ steps.envs.outputs.list }}
         run: |
-          set -euo pipefail
-
-          # Determine which envs changed
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            ENVS="${{ github.event.client_payload.envs }}"
-          else
-            ENVS="${{ github.event.inputs.envs }}"
-          fi
+          flox activate -- bash -euo pipefail <<'SCRIPT'
           echo "Changed envs: $ENVS"
 
           # Trust all shared envs so flox include upgrade works
@@ -149,9 +157,6 @@ jobs:
             git push -u origin "$BRANCH"
 
             # Open PR
-            # (built via printf so the multi-line body stays valid inside this
-            # YAML block scalar — raw embedded newlines here would de-indent
-            # past the scalar's indentation and break workflow YAML parsing)
             body=$(printf 'Automated upgrade of shared flox environment(s): `%s`.\n\nA new generation was published to FloxHub. This PR updates the lockfile\nto pin the latest version.\n\nOpened by [`flox-include-upgrade`](https://github.com/apricaut/flox-ci/actions/workflows/flox-include-upgrade.yml).' "$ENVS")
             gh pr create -R "apricaut/$repo" \
               --title "chore(flox): upgrade ${ENVS} include" \
@@ -162,3 +167,4 @@ jobs:
             echo "::endgroup::"
             cd /
           done
+          SCRIPT
