@@ -145,14 +145,13 @@ jobs:
             git push -u origin "$BRANCH"
 
             # Open PR
+            # (built via printf so the multi-line body stays valid inside this
+            # YAML block scalar — raw embedded newlines here would de-indent
+            # past the scalar's indentation and break workflow YAML parsing)
+            body=$(printf 'Automated upgrade of shared flox environment(s): `%s`.\n\nA new generation was published to FloxHub. This PR updates the lockfile\nto pin the latest version.\n\nOpened by [`flox-include-upgrade`](https://github.com/apricaut/flox-ci/actions/workflows/flox-include-upgrade.yml).' "$ENVS")
             gh pr create -R "apricaut/$repo" \
               --title "chore(flox): upgrade ${ENVS} include" \
-              --body "Automated upgrade of shared flox environment(s): \`${ENVS}\`.
-
-A new generation was published to FloxHub. This PR updates the lockfile
-to pin the latest version.
-
-Opened by [\`flox-include-upgrade\`](https://github.com/apricaut/flox-ci/actions/workflows/flox-include-upgrade.yml)." \
+              --body "$body" \
               --label "flox,dependencies"
 
             echo "  PR created"
