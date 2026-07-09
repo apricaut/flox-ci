@@ -1,0 +1,161 @@
+name: flox-include-upgrade
+
+# Triggered by flox-environments CI after publishing changed shared envs.
+# Discovers consumer repos in the apricaut org, runs `flox include upgrade`,
+# and opens PRs where the lockfile changed.
+on:
+  repository_dispatch:
+    types: [flox-env-upgraded]
+  workflow_dispatch:
+    inputs:
+      envs:
+        description: "Comma-separated env names to upgrade (e.g. rust-toolchain,postgres)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flox-include-upgrade
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: flox/install-flox-action@v2
+      - uses: dopplerhq/cli-action@v3
+
+      - name: Read apricaut GitHub App creds from Doppler
+        id: app
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          dr=(doppler run --project platform --config common --)
+          app_id="$("${dr[@]}" bash -c 'echo "$APRICAUT_APP_ID"')"
+          echo "::add-mask::$app_id"
+          echo "app-id=$app_id" >> "$GITHUB_OUTPUT"
+          key="$("${dr[@]}" bash -c 'echo "$APRICAUT_APP_PRIVATE_KEY"')"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$key"
+          {
+            echo "private-key<<__PEM__"
+            printf '%s\n' "$key"
+            echo "__PEM__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.app.outputs.app-id }}
+          private-key: ${{ steps.app.outputs.private-key }}
+          owner: apricaut
+
+      - name: Discover and upgrade consumer repos
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Determine which envs changed
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            ENVS="${{ github.event.client_payload.envs }}"
+          else
+            ENVS="${{ github.event.inputs.envs }}"
+          fi
+          echo "Changed envs: $ENVS"
+
+          # Trust all shared envs so flox include upgrade works
+          dr=(doppler run --project platform --config common --)
+          IFS=',' read -ra ENV_LIST <<< "$ENVS"
+          for env in "${ENV_LIST[@]}"; do
+            "${dr[@]}" flox config --set "trusted_environments.\"apricaut/$env\"" "trust"
+          done
+
+          BRANCH="flox/include-upgrade"
+
+          # List all repos in apricaut org
+          repos=$(gh repo list apricaut --limit 100 --json name,isArchived \
+            -q '.[] | select(.isArchived == false) | .name')
+
+          for repo in $repos; do
+            echo "::group::$repo"
+
+            # Fetch manifest via API (skip repos without one)
+            manifest=$(gh api "repos/apricaut/$repo/contents/.flox/env/manifest.toml" \
+              -q '.content' 2>/dev/null | base64 -d 2>/dev/null) || {
+              echo "  no .flox/env/manifest.toml — skipping"
+              echo "::endgroup::"
+              continue
+            }
+
+            # Check if this repo includes any of the changed envs
+            match=false
+            for env in "${ENV_LIST[@]}"; do
+              if echo "$manifest" | grep -q "apricaut/$env"; then
+                match=true
+                break
+              fi
+            done
+
+            if [ "$match" = false ]; then
+              echo "  does not include any changed envs — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Check for existing open PR
+            existing=$(gh pr list -R "apricaut/$repo" --head "$BRANCH" \
+              --json number -q '.[0].number' 2>/dev/null || true)
+            if [ -n "$existing" ]; then
+              echo "  PR #$existing already open — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Clone, upgrade, and PR
+            work="$RUNNER_TEMP/upgrade-$repo"
+            gh repo clone "apricaut/$repo" "$work" -- --depth 1
+            cd "$work"
+
+            git checkout -b "$BRANCH"
+
+            # Run flox include upgrade
+            "${dr[@]}" flox include upgrade -d . || {
+              echo "  flox include upgrade failed — skipping"
+              echo "::endgroup::"
+              cd /
+              continue
+            }
+
+            # Check if lockfile changed
+            if git diff --quiet; then
+              echo "  already up to date"
+              echo "::endgroup::"
+              cd /
+              continue
+            fi
+
+            # Commit and push
+            git add .flox/env/manifest.lock
+            git commit -m "chore(flox): upgrade ${ENVS} include"
+            git push -u origin "$BRANCH"
+
+            # Open PR
+            gh pr create -R "apricaut/$repo" \
+              --title "chore(flox): upgrade ${ENVS} include" \
+              --body "Automated upgrade of shared flox environment(s): \`${ENVS}\`.
+
+A new generation was published to FloxHub. This PR updates the lockfile
+to pin the latest version.
+
+Opened by [\`flox-include-upgrade\`](https://github.com/apricaut/flox-ci/actions/workflows/flox-include-upgrade.yml)." \
+              --label "flox,dependencies"
+
+            echo "  PR created"
+            echo "::endgroup::"
+            cd /
+          done
