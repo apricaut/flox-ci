@@ -75,6 +75,10 @@ jobs:
             "${dr[@]}" flox config --set "trusted_environments.\"apricaut/$env\"" "trust"
           done
 
+          # Set git identity for commits
+          git config --global user.name "apricaut[bot]"
+          git config --global user.email "apricaut[bot]@users.noreply.github.com"
+
           BRANCH="flox/include-upgrade"
 
           # List all repos in apricaut org
@@ -132,7 +136,7 @@ jobs:
             }
 
             # Check if lockfile changed
-            if git diff --quiet; then
+            if git diff --quiet -- .flox/; then
               echo "  already up to date"
               echo "::endgroup::"
               cd /
@@ -140,7 +144,7 @@ jobs:
             fi
 
             # Commit and push
-            git add .flox/env/manifest.lock
+            git add .flox/
             git commit -m "chore(flox): upgrade ${ENVS} include"
             git push -u origin "$BRANCH"
 
