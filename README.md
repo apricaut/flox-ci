@@ -116,3 +116,16 @@ jobs:
 Inputs: `app`, `working-directory`, `cargo-scope`, `publish`, `floxhub-owner`,
 `deploy-repo`, `deploy-manifest`, `doppler-token`. When `publish=true` it runs the
 deliver phase (FloxHub publish + promote PR); otherwise it just verifies.
+
+## Shared environment upgrade automation
+
+When a shared environment in `flox-environments` publishes a new generation,
+CI fires a `repository_dispatch` to this repo. The `flox-include-upgrade`
+workflow discovers all `apricaut` org repos that include the changed env, runs
+`flox include upgrade`, and opens a PR if the lockfile changed.
+
+Manually trigger for a specific env:
+
+```yaml
+gh workflow run flox-include-upgrade.yml -f envs=rust-toolchain
+```
