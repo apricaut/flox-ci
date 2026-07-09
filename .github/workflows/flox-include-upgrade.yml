@@ -132,6 +132,7 @@ jobs:
             work="$RUNNER_TEMP/upgrade-$repo"
             gh repo clone "apricaut/$repo" "$work" -- --depth 1
             cd "$work"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/apricaut/${repo}.git"
 
             git checkout -b "$BRANCH"
 
