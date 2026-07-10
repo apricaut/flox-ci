@@ -133,7 +133,7 @@ jobs:
           DP_PROJECT: ${{ inputs.doppler_project }}
           DP_CONFIG: ${{ inputs.doppler_config }}
         run: |
-          flox activate -- bash -euo pipefail <<'SCRIPT'
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
           echo "::add-mask::$ID"
           echo "app-id=$ID" >> "$GITHUB_OUTPUT"
@@ -210,7 +210,7 @@ jobs:
           DP_PROJECT: ${{ inputs.doppler_project }}
           DP_CONFIG: ${{ inputs.doppler_config }}
         run: |
-          flox activate -- bash -euo pipefail <<'SCRIPT'
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
           dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
           # -o is required: without it flox publishes to the token's PERSONAL
@@ -243,7 +243,7 @@ jobs:
           DP_CONFIG: ${{ inputs.doppler_config }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
         run: |
-          flox activate -- bash -euo pipefail <<'SCRIPT'
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
           echo "::add-mask::$ID"
           echo "app-id=$ID" >> "$GITHUB_OUTPUT"
@@ -280,7 +280,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DEPLOY_MANIFEST: ${{ inputs.deploy_manifest }}
         run: |
-          flox activate -- bash -euo pipefail <<'SCRIPT'
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
 
           # A brand-new service repo makes GitHub re-evaluate the App
