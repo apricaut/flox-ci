@@ -270,15 +270,16 @@ jobs:
       - name: Promote to the cluster (open + auto-merge a deploy PR)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         # `flox push` updated FloxHub, but ArgoCD watches Git, not FloxHub, and the
-        # pod only re-pulls its environment on restart. The in-cluster flox shim
-        # accepts ONLY a plain owner/name ref in flox.dev/environment (a generation
-        # like owner/name/2 CrashLoops the pod), so we DON'T touch that — we bump a
-        # flox.dev/revision annotation (a pod-template change ArgoCD rolls on),
-        # which makes the pod re-pull the latest published environment.
+        # pod only re-pulls its environment on restart. We set flox.dev/environment
+        # to $OWNER/$APP (so an owner migration is picked up automatically) and bump
+        # flox.dev/revision (a pod-template change ArgoCD rolls on). The in-cluster
+        # flox shim accepts ONLY a plain owner/name ref in flox.dev/environment (a
+        # generation like owner/name/2 CrashLoops the pod).
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DEPLOY_MANIFEST: ${{ inputs.deploy_manifest }}
+          FLOXHUB_OWNER: ${{ inputs.floxhub_owner }}
         run: |
           flox activate -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
@@ -328,6 +329,11 @@ jobs:
           fi
           # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
           # jq can't parse it (jq: parse error: Invalid numeric literal).
+          # Set both annotations: environment tracks the FloxHub owner (so an
+          # owner migration lands automatically), revision triggers the rollout.
+          ENV="$FLOXHUB_OWNER/$APP" yq -i \
+            '.spec.template.metadata.annotations["flox.dev/environment"] = strenv(ENV)' \
+            "$DEPLOY"
           SHA="$GITHUB_SHA" yq -i \
             '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
             "$DEPLOY"
