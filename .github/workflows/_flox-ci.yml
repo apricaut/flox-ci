@@ -43,6 +43,10 @@ on:
         description: "App framework: dioxus (wasm client + server) or axum (server only). Selects the lint/test shape; the build command itself lives in the app's flox [build]."
         type: string
         default: dioxus
+      deploy_manifest:
+        description: "Path to the deployment manifest in the gitops repo. {name} is replaced with the repo name at runtime. Default: apps/{name}/base/deployment.yaml (tenant convention). Platform services override to argocd/addons/manifests/{name}/deployment.yaml."
+        type: string
+        default: "apps/{name}/base/deployment.yaml"
     secrets:
       DOPPLER_TOKEN:
         description: "Doppler token scoped to <doppler_project>/<doppler_config>. Only the push-to-main publish/promote steps use it, so it's optional: Dependabot-triggered PR runs don't receive Actions secrets and must still be able to lint+test."
@@ -274,6 +278,7 @@ jobs:
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          DEPLOY_MANIFEST: ${{ inputs.deploy_manifest }}
         run: |
           flox activate -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
@@ -296,7 +301,7 @@ jobs:
             sleep 10
           done
           cd gitops
-          DEPLOY="apps/$APP/base/deployment.yaml"
+          DEPLOY="${DEPLOY_MANIFEST//\{name\}/$APP}"
           # A brand-new service's first publish always races the new-service
           # run: this push fires the moment the code repo is created, but
           # apps/<name>/ only lands on gitops main when the deploy PR merges.
