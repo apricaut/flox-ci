@@ -1,14 +1,16 @@
-name: axum-web
+name: rust-ci
 
-# DEPRECATED compatibility shim. Use rust-ci.yml for Rust server apps.
+# Generic Rust server-app wrapper: build/test -> publish Flox package -> push
+# runtime env -> promote. Use this for axum/askama/htmx/API services and other
+# Rust server apps that do not need the Dioxus wasm-specific lint/test split.
 #
 #   jobs:
 #     ci:
 #       uses: apricaut/flox-ci/.github/workflows/rust-ci.yml@v6
 #       secrets: inherit
 #
-# This file remains so existing callers of axum-web.yml keep working while app
-# repos migrate to the generic workflow name.
+# All logic lives in _flox-ci.yml; this presets framework=axum, which means a
+# single host-target fmt/clippy/test pass before the main-branch publish.
 on:
   workflow_call:
     secrets:

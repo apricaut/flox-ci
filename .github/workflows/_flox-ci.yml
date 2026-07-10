@@ -3,11 +3,12 @@ name: _flox-ci
 # BASE reusable pipeline (build -> publish -> push runtime env -> promote) for
 # apricaut SERVER apps that deploy to the cluster via flox + ArgoCD.
 #
-# Don't call this directly — call a framework wrapper, which presets `framework`:
+# Don't call this directly — call a wrapper, which presets `framework`:
 #
 #   jobs:
 #     ci:
-#       uses: apricaut/flox-ci/.github/workflows/dioxus-web.yml@v1   # or axum-web.yml
+#       uses: apricaut/flox-ci/.github/workflows/rust-ci.yml@v6
+#       # or dioxus-web.yml for Dioxus apps
 #       secrets: inherit
 #
 # The build command lives in each app's flox [build]; this pipeline only varies
