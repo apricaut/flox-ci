@@ -213,6 +213,10 @@ jobs:
           flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
           dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
+          # Earlier flox activate steps create local runtime/cache/log state.
+          # flox publish refuses dirty env dirs, so keep that hygiene here
+          # instead of requiring every app repo to carry CI-specific ignores.
+          rm -rf .flox/cache .flox/log .flox/run
           # -o is required: without it flox publishes to the token's PERSONAL
           # catalog, ignoring the owner input entirely.
           "${dr[@]}" flox publish -o "$OWNER" "$APP"
