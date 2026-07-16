@@ -1,0 +1,59 @@
+name: rust-package
+# Publish-only reusable: builds ONE [build.<package>] target from the caller
+# repo's .flox manifest and publishes it to FloxHub. For CLI/library packages
+# with nothing to deploy — the full service pipeline (deploy-env push + gitops
+# promotion) stays in rust-ci.yml/_flox-ci.yml. First consumer: apricaut/apri,
+# which must ship as a flox package because glibc-linked release binaries
+# cannot execute inside the Nix-style flox runtime containers.
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: "The [build.<name>] target to flox publish"
+        required: true
+        type: string
+      floxhub_owner:
+        description: "FloxHub account the package is published under"
+        type: string
+        default: apricaut
+      doppler_project:
+        description: "Doppler project holding the shared CI secrets (FloxHub token)"
+        type: string
+        default: platform
+      doppler_config:
+        description: "Doppler config within the project"
+        type: string
+        default: common
+
+jobs:
+  publish:
+    name: publish ${{ inputs.package }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # flox publish requires the pushed revision
+
+      - uses: flox/install-flox-action@v2
+
+      - name: Publish package to FloxHub
+        # FLOX_FLOXHUB_TOKEN lives in <project>/<config>; the CI Doppler token
+        # is account-wide with no default config, so name both explicitly —
+        # same pattern as _flox-ci.yml's publish step.
+        env:
+          PKG: ${{ inputs.package }}
+          OWNER: ${{ inputs.floxhub_owner }}
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+        run: |
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
+          dr=(doppler run --project "$DP_PROJECT" --config "$DP_CONFIG" --)
+          # Earlier flox activate steps create local runtime/cache/log state.
+          # flox publish refuses dirty env dirs, so keep that hygiene here.
+          rm -rf .flox/cache .flox/log .flox/run
+          # -o is required: without it flox publishes to the token's PERSONAL
+          # catalog, ignoring the owner input entirely.
+          "${dr[@]}" flox publish -o "$OWNER" "$PKG"
+          SCRIPT
