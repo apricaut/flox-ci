@@ -1,0 +1,40 @@
+name: doppler-mirror
+# Reusable: mirror the caller's CI DOPPLER_TOKEN secret into a Doppler
+# project/config, so runtime paths (e.g. the provisioner's in-cluster build
+# jobs) get the same workplace-capable token CI holds — without any human
+# ever handling the value. Re-run to rotate.
+#
+# Deliberately flox-free: a Doppler write needs no repo environment, and
+# activating caller envs in CI drags in remote-include trust configuration
+# (the exact failure mode this replaced).
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: "Doppler project to write into"
+        required: true
+        type: string
+      config:
+        description: "Doppler config within the project"
+        required: true
+        type: string
+      secret_name:
+        description: "Doppler secret key to write"
+        type: string
+        default: DOPPLER_TOKEN
+
+jobs:
+  mirror:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    env:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    steps:
+      - name: Install doppler CLI
+        run: curl -Ls --tlsv1.2 --proto "=https" https://cli.doppler.com/install.sh | sudo sh
+
+      - name: Mirror CI token into ${{ inputs.project }}/${{ inputs.config }}
+        run: |
+          doppler secrets set "${{ inputs.secret_name }}" "$DOPPLER_TOKEN" \
+            --project "${{ inputs.project }}" --config "${{ inputs.config }}" --silent
+          echo "mirrored ${{ inputs.secret_name }} into ${{ inputs.project }}/${{ inputs.config }}"
