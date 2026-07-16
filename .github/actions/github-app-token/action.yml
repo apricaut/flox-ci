@@ -1,0 +1,53 @@
+name: github-app-token
+description: >-
+  Mint a short-lived GitHub App installation token from the apricaut GitHub
+  App. App credentials (APRICAUT_APP_ID / APRICAUT_APP_PRIVATE_KEY) are read
+  from Doppler platform/common — the private key never lives in repo secrets
+  or logs. Replaces the identical two-step block previously copy-pasted into
+  new-service, delete-service, and migrate-flox-ci.
+
+inputs:
+  doppler-token:
+    description: Doppler token authorized to read platform/common.
+    required: true
+  owner:
+    description: >-
+      Org/user to scope the installation token to. Blank scopes the token to
+      the calling repository only; set to the org name (e.g. apricaut) when
+      the token must reach other repos in the installation.
+    required: false
+    default: ""
+
+outputs:
+  token:
+    description: The minted GitHub App installation token.
+    value: ${{ steps.mint.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - uses: dopplerhq/cli-action@v3
+
+    - name: Read apricaut App creds from Doppler
+      id: creds
+      shell: bash
+      env:
+        DOPPLER_TOKEN: ${{ inputs.doppler-token }}
+      run: |
+        set -euo pipefail
+        ID="$(doppler secrets get APRICAUT_APP_ID --project platform --config common --plain)"
+        echo "::add-mask::$ID"
+        echo "app-id=$ID" >> "$GITHUB_OUTPUT"
+        KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project platform --config common --plain)"
+        while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
+        { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+
+    - name: Mint installation token
+      id: mint
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ steps.creds.outputs.app-id }}
+        private-key: ${{ steps.creds.outputs.private-key }}
+        # Empty string is treated as "not provided" by the action, which
+        # scopes the token to the calling repository.
+        owner: ${{ inputs.owner }}

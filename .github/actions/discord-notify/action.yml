@@ -1,0 +1,46 @@
+name: discord-notify
+description: >-
+  Post a message to the platform Discord webhook. The webhook URL is read
+  from Doppler platform/common (GITHUB_DISCORD_WEBHOOK_URL, falling back to
+  DISCORD_WEBHOOK_URL) so it stays out of git. Never fails the calling job:
+  a missing webhook skips, an HTTP error is logged and swallowed. Replaces
+  the drifted copy-pasted notify blocks in bootstrap, infra, new-service,
+  and delete-service.
+
+inputs:
+  doppler-token:
+    description: Doppler token authorized to read platform/common.
+    required: true
+  content:
+    description: Message content (Discord markdown supported).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: dopplerhq/cli-action@v3
+
+    - name: Post to Discord
+      shell: bash
+      env:
+        DOPPLER_TOKEN: ${{ inputs.doppler-token }}
+        CONTENT: ${{ inputs.content }}
+      run: |
+        set -euo pipefail
+        webhook="$(doppler secrets get GITHUB_DISCORD_WEBHOOK_URL \
+          --project platform --config common --plain 2>/dev/null || true)"
+        if [ -z "$webhook" ]; then
+          webhook="$(doppler secrets get DISCORD_WEBHOOK_URL \
+            --project platform --config common --plain 2>/dev/null || true)"
+        fi
+        if [ -z "$webhook" ]; then
+          echo "no Discord webhook configured; skipping notification"
+          exit 0
+        fi
+        payload="$(jq -n --arg content "$CONTENT" '{content: $content}')"
+        status="$(curl -sS -o "$RUNNER_TEMP/discord-response.txt" -w "%{http_code}" \
+          -X POST "$webhook" -H "Content-Type: application/json" -d "$payload" || true)"
+        if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+          echo "Discord notification failed with HTTP $status"
+          cat "$RUNNER_TEMP/discord-response.txt" || true
+        fi

@@ -1,0 +1,35 @@
+name: flox-setup
+description: >-
+  Install flox and trust the shared apricaut toolchain environments. Remote
+  includes need explicit trust before `flox activate` will use them; every
+  workflow that activates a flox env repeats these two steps — this action is
+  the single place they live.
+
+inputs:
+  trust:
+    description: >-
+      Newline-delimited FloxHub environments to trust. Defaults to the two
+      shared toolchain envs almost every apricaut workflow activates.
+    required: false
+    default: |
+      apricaut/rust-toolchain
+      apricaut/platform-toolchain
+
+runs:
+  using: composite
+  steps:
+    - uses: flox/install-flox-action@v2
+
+    - name: Trust shared toolchain envs
+      shell: bash
+      env:
+        TRUST_ENVS: ${{ inputs.trust }}
+      run: |
+        set -euo pipefail
+        while IFS= read -r env_name; do
+          env_name="$(printf '%s' "$env_name" | tr -d '\r' | xargs)"
+          [ -z "$env_name" ] && continue
+          flox config --set "trusted_environments.\"$env_name\"" "trust"
+        done <<EOF
+        $TRUST_ENVS
+        EOF
