@@ -38,6 +38,14 @@ jobs:
 
       - uses: flox/install-flox-action@v2
 
+      # Same trust step as _flox-ci: the caller repo's env typically includes
+      # the shared rust-toolchain remotely, and flox publish (which activates
+      # the local env to build) refuses untrusted remote includes in CI.
+      - name: Trust shared envs
+        run: |
+          flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
+          flox config --set "trusted_environments.\"apricaut/ci-toolchain\"" "trust"
+
       - name: Publish package to FloxHub
         # FLOX_FLOXHUB_TOKEN lives in <project>/<config>; the CI Doppler token
         # is account-wide with no default config, so name both explicitly —
