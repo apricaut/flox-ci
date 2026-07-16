@@ -117,6 +117,36 @@ Inputs: `app`, `working-directory`, `cargo-scope`, `publish`, `floxhub-owner`,
 `deploy-repo`, `deploy-manifest`, `doppler-token`. When `publish=true` it runs the
 deliver phase (FloxHub publish + promote PR); otherwise it just verifies.
 
+## Shared composite actions
+
+Small building blocks the platform repo's workflows (and any org repo) compose
+instead of copy-pasting:
+
+- **`actions/flox-setup`** — install flox + trust the shared toolchain envs.
+  Optional `trust` input (newline list) overrides the default
+  `apricaut/rust-toolchain` + `apricaut/platform-toolchain` pair.
+- **`actions/github-app-token`** — mint a short-lived GitHub App installation
+  token; App creds come from Doppler platform/common, never repo secrets.
+  Inputs: `doppler-token`, optional `owner` (org-wide scope). Output: `token`.
+- **`actions/discord-notify`** — post to the platform Discord webhook (URL
+  read from Doppler platform/common). Never fails the calling job.
+  Inputs: `doppler-token`, `content`.
+
+```yaml
+steps:
+  - uses: apricaut/flox-ci/.github/actions/flox-setup@main
+  - uses: apricaut/flox-ci/.github/actions/github-app-token@main
+    id: token
+    with:
+      doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+      owner: apricaut
+  - uses: apricaut/flox-ci/.github/actions/discord-notify@main
+    if: always()
+    with:
+      doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+      content: "✅ deploy succeeded"
+```
+
 ## Shared environment upgrade automation
 
 When a shared environment in `flox-environments` publishes a new generation,
