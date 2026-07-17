@@ -307,6 +307,16 @@ jobs:
           done
           cd gitops
           DEPLOY="${DEPLOY_MANIFEST//\{name\}/$APP}"
+          # App-claim tenants (the new shape) have app.yaml, not
+          # deployment.yaml. The annotation goes on whichever manifest
+          # exists — the composition propagates it to the composed
+          # Deployment, and ArgoCD rolls the pod either way.
+          if [ ! -f "$DEPLOY" ]; then
+            CLAIM="${DEPLOY%deployment.yaml}app.yaml"
+            if [ -f "$CLAIM" ]; then
+              DEPLOY="$CLAIM"
+            fi
+          fi
           # A brand-new service's first publish always races the new-service
           # run: this push fires the moment the code repo is created, but
           # apps/<name>/ only lands on gitops main when the deploy PR merges.
@@ -335,11 +345,20 @@ jobs:
           # jq can't parse it (jq: parse error: Invalid numeric literal).
           # Set both annotations: environment tracks the FloxHub owner (so an
           # owner migration lands automatically), revision triggers the rollout.
+          # App claims (app.yaml) put annotations on .metadata (the claim
+          # itself — Crossplane recomposes on claim generation change);
+          # legacy Deployments (deployment.yaml) put them on the pod
+          # template (.spec.template.metadata) so ArgoCD rolls the pod.
+          if [[ "$DEPLOY" == *app.yaml ]]; then
+            ANNOT_PATH='.metadata.annotations'
+          else
+            ANNOT_PATH='.spec.template.metadata.annotations'
+          fi
           ENV="$FLOXHUB_OWNER/$APP" yq -i \
-            '.spec.template.metadata.annotations["flox.dev/environment"] = strenv(ENV)' \
+            "${ANNOT_PATH}[\"flox.dev/environment\"] = strenv(ENV)" \
             "$DEPLOY"
           SHA="$GITHUB_SHA" yq -i \
-            '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
+            "${ANNOT_PATH}[\"flox.dev/revision\"] = strenv(SHA)" \
             "$DEPLOY"
           if git diff --quiet -- "$DEPLOY"; then
             echo "revision unchanged; nothing to promote"; exit 0
