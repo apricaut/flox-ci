@@ -46,6 +46,49 @@ jobs:
           flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
           flox config --set "trusted_environments.\"apricaut/ci-toolchain\"" "trust"
 
+      # `flox publish` builds the package from a clean clone inside the flox
+      # sandbox, so cargo must be able to resolve PRIVATE apricaut crates
+      # (e.g. apri depends on apricaut-content-schema). Without this, the build
+      # dies with "failed to authenticate when downloading repository". Ported
+      # verbatim from _flox-ci.yml, which server apps have always had — this
+      # publish-only pipeline lacked it because its first consumer (apri) had
+      # no private deps until it gained one. No-ops for packages without any.
+      - name: Read apricaut App creds from Doppler
+        id: depapp
+        if: env.DOPPLER_TOKEN != ''
+        env:
+          DP_PROJECT: ${{ inputs.doppler_project }}
+          DP_CONFIG: ${{ inputs.doppler_config }}
+        run: |
+          flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
+          ID="$(doppler secrets get APRICAUT_APP_ID --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          echo "::add-mask::$ID"
+          echo "app-id=$ID" >> "$GITHUB_OUTPUT"
+          KEY="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project "$DP_PROJECT" --config "$DP_CONFIG" --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$KEY"
+          { echo "private-key<<__PEM__"; printf '%s\n' "$KEY"; echo "__PEM__"; } >> "$GITHUB_OUTPUT"
+          SCRIPT
+
+      - name: Mint apricaut App token for private cargo deps
+        id: deptoken
+        if: env.DOPPLER_TOKEN != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.depapp.outputs.app-id }}
+          private-key: ${{ steps.depapp.outputs.private-key }}
+          owner: apricaut
+          # no `repositories:` → the token covers every repo the App can access,
+          # so any private apricaut crate resolves with no per-repo bookkeeping.
+
+      - name: Authenticate git for private apricaut cargo deps
+        if: env.DOPPLER_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ steps.deptoken.outputs.token }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/apricaut/".insteadOf \
+            "https://github.com/apricaut/"
+
       - name: Publish package to FloxHub
         # FLOX_FLOXHUB_TOKEN lives in <project>/<config>; the CI Doppler token
         # is account-wide with no default config, so name both explicitly —
