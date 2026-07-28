@@ -313,11 +313,34 @@ jobs:
           # Nothing is lost by skipping — the initial ArgoCD sync starts the
           # pod against the latest published env, and the next app push (or a
           # re-run) promotes normally.
-          if [ ! -f "$DEPLOY" ]; then
-            # First green build of a NEW service: apps/<name>/ lives on the
+          # Two promote shapes (yq: YAML-aware; the manifest is YAML, so jq
+          # can't parse it — "jq: parse error: Invalid numeric literal"):
+          #  - SERVICE: a static apps/<name>/base/deployment.yaml — bump the
+          #    flox.dev/revision pod annotation directly.
+          #  - TENANT: composition-rendered (an App claim, NO deployment.yaml) —
+          #    bump spec.revision on apps/<name>/base/app.yaml; the App/FloxApp
+          #    composition renders it into the pod's flox.dev/revision, which
+          #    ArgoCD + crossplane then roll on. Without this a tenant publishes
+          #    but never rolls — it keeps running old code until a manual restart.
+          APP_CLAIM="apps/$APP/base/app.yaml"
+          if [ -f "$DEPLOY" ]; then
+            TARGET="$DEPLOY"
+            # environment tracks the FloxHub owner (so an owner migration lands
+            # automatically); revision triggers the rollout.
+            ENV="$FLOXHUB_OWNER/$APP" yq -i \
+              '.spec.template.metadata.annotations["flox.dev/environment"] = strenv(ENV)' \
+              "$DEPLOY"
+            SHA="$GITHUB_SHA" yq -i \
+              '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
+              "$DEPLOY"
+          elif [ -f "$APP_CLAIM" ]; then
+            TARGET="$APP_CLAIM"
+            SHA="$GITHUB_SHA" yq -i '.spec.revision = strenv(SHA)' "$APP_CLAIM"
+          else
+            # First green build of a NEW service/tenant: apps/<name>/ lives on the
             # unmerged new-service PR (head branch service/<app>/*). Auto-merge
-            # it so the service deploys on its first successful build instead of
-            # waiting for a human — the build just proved the env publishes.
+            # it so it deploys on its first successful build instead of waiting
+            # for a human — the build just proved the env publishes.
             NSPR=$(gh pr list --repo "$GITOPS_REPO" --state open --json number,headRefName \
               -q ".[] | select(.headRefName | startswith(\"service/$APP/\")) | .number" | head -1)
             if [ -n "$NSPR" ]; then
@@ -328,20 +351,10 @@ jobs:
                 echo "new-service PR merge not ready (attempt ${attempt}); retrying..."; sleep 5
               done
             fi
-            echo "$DEPLOY not on $GITOPS_REPO main yet and no open service/$APP PR; skipping promote"
+            echo "neither $DEPLOY nor $APP_CLAIM on $GITOPS_REPO main yet and no open service/$APP PR; skipping promote"
             exit 0
           fi
-          # yq (YAML-aware; preinstalled on the runner). The manifest is YAML, so
-          # jq can't parse it (jq: parse error: Invalid numeric literal).
-          # Set both annotations: environment tracks the FloxHub owner (so an
-          # owner migration lands automatically), revision triggers the rollout.
-          ENV="$FLOXHUB_OWNER/$APP" yq -i \
-            '.spec.template.metadata.annotations["flox.dev/environment"] = strenv(ENV)' \
-            "$DEPLOY"
-          SHA="$GITHUB_SHA" yq -i \
-            '.spec.template.metadata.annotations["flox.dev/revision"] = strenv(SHA)' \
-            "$DEPLOY"
-          if git diff --quiet -- "$DEPLOY"; then
+          if git diff --quiet -- "$TARGET"; then
             echo "revision unchanged; nothing to promote"; exit 0
           fi
 
@@ -354,7 +367,7 @@ jobs:
 
           gh pr create --repo "$GITOPS_REPO" --base main --head "$BRANCH" \
             --title "deploy($APP): roll to ${GITHUB_SHA:0:7}" \
-            --body "Automated promotion from $APP@${GITHUB_SHA:0:7}. Bumps flox.dev/revision so ArgoCD rolls the pod onto the latest published FloxHub environment."
+            --body "Automated promotion from $APP@${GITHUB_SHA:0:7}. Bumps the deploy revision so ArgoCD rolls the pod onto the latest published FloxHub environment."
 
           for attempt in 1 2 3 4 5; do
             if gh pr merge "$BRANCH" --repo "$GITOPS_REPO" --squash --delete-branch; then
