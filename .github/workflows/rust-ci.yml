@@ -18,6 +18,10 @@ on:
         description: "Path to the deployment manifest in the gitops repo. {name} is replaced with the repo name. Default: apps/{name}/base/deployment.yaml. Platform services pass argocd/addons/manifests/{name}/deployment.yaml."
         type: string
         default: "apps/{name}/base/deployment.yaml"
+      shared_revision_file:
+        description: "Optional gitops path to an EnvironmentConfig whose .data.revision this publish should bump (content-tier renderer fan-out). When set, promote bumps this file instead of a per-app claim/deployment."
+        type: string
+        default: ""
     secrets:
       DOPPLER_TOKEN:
         description: "Doppler token scoped to the shared CI config (FloxHub + deploy)"
@@ -29,4 +33,5 @@ jobs:
     with:
       framework: axum
       deploy_manifest: ${{ inputs.deploy_manifest }}
+      shared_revision_file: ${{ inputs.shared_revision_file }}
     secrets: inherit

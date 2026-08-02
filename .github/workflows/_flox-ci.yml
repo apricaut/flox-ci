@@ -47,6 +47,10 @@ on:
         description: "Path to the deployment manifest in the gitops repo. {name} is replaced with the repo name at runtime. Default: apps/{name}/base/deployment.yaml (tenant convention). Platform services override to argocd/addons/manifests/{name}/deployment.yaml."
         type: string
         default: "apps/{name}/base/deployment.yaml"
+      shared_revision_file:
+        description: "Optional gitops path to an EnvironmentConfig whose .data.revision this publish should bump (content-tier renderer fan-out). When set, promote bumps this file instead of a per-app claim/deployment."
+        type: string
+        default: ""
     secrets:
       DOPPLER_TOKEN:
         description: "Doppler token scoped to <doppler_project>/<doppler_config>. Only the push-to-main publish/promote steps use it, so it's optional: Dependabot-triggered PR runs don't receive Actions secrets and must still be able to lint+test."
@@ -284,6 +288,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DEPLOY_MANIFEST: ${{ inputs.deploy_manifest }}
           FLOXHUB_OWNER: ${{ inputs.floxhub_owner }}
+          SHARED_REVISION_FILE: ${{ inputs.shared_revision_file }}
         run: |
           flox activate -r apricaut/ci-toolchain -- bash -euo pipefail <<'SCRIPT'
           APP="${GITHUB_REPOSITORY##*/}"
@@ -323,7 +328,14 @@ jobs:
           #    ArgoCD + crossplane then roll on. Without this a tenant publishes
           #    but never rolls — it keeps running old code until a manual restart.
           APP_CLAIM="apps/$APP/base/app.yaml"
-          if [ -f "$DEPLOY" ]; then
+          if [ -n "${SHARED_REVISION_FILE:-}" ]; then
+            if [ ! -f "$SHARED_REVISION_FILE" ]; then
+              echo "shared_revision_file '$SHARED_REVISION_FILE' not found on $GITOPS_REPO main; skipping promote" >&2
+              exit 0
+            fi
+            TARGET="$SHARED_REVISION_FILE"
+            SHA="$GITHUB_SHA" yq -i '.data.revision = strenv(SHA)' "$SHARED_REVISION_FILE"
+          elif [ -f "$DEPLOY" ]; then
             TARGET="$DEPLOY"
             # environment tracks the FloxHub owner (so an owner migration lands
             # automatically); revision triggers the rollout.
