@@ -122,6 +122,7 @@ jobs:
         run: |
           flox config --set "trusted_environments.\"apricaut/rust-toolchain\"" "trust"
           flox config --set "trusted_environments.\"apricaut/ci-toolchain\"" "trust"
+          flox config --set "trusted_environments.\"apricaut/nats-toolchain\"" "trust"
 
       # Private cargo git deps (apricaut-ui, apricaut-billing-ui, …) live in
       # private org repos. The checkout GITHUB_TOKEN can't clone ACROSS repos, so
