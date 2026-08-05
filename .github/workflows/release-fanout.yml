@@ -1,0 +1,191 @@
+name: release-fanout
+
+# Self-updating dependencies: when a library repo pushes a release tag, open a
+# bump PR in EVERY apricaut repo that pins this library by git tag in a
+# Cargo.toml. Each dependent's own CI then proves (or disproves) the upgrade —
+# no repo silently falls releases behind.
+#
+# Call from a library repo's tag-push workflow:
+#
+#   name: release-fanout
+#   on:
+#     push:
+#       tags: ["v*", "apricaut-*-v*"]
+#   jobs:
+#     fanout:
+#       uses: apricaut/flox-ci/.github/workflows/release-fanout.yml@main
+#       secrets: inherit
+#
+# Dependents are DISCOVERED, not registered: GitHub code search for this
+# repo's URL inside Cargo.toml across the org, so a new consumer repo joins
+# the fan-out the moment it pins the crate. (Code search indexing can lag a
+# few minutes behind a brand-new pin; the next release catches it.)
+#
+# Idempotent: a dependent already on the tag, or with the bump branch already
+# pushed, is skipped — re-running the workflow never duplicates PRs.
+
+on:
+  workflow_call:
+    inputs:
+      automerge:
+        description: "Enable GitHub auto-merge (squash) on each bump PR so green CI lands it without a human. Repos without required checks merge immediately — only enable once branch protection requires CI."
+        type: boolean
+        default: false
+    secrets:
+      DOPPLER_TOKEN:
+        description: "Doppler token scoped to platform/common (APRICAUT_APP_ID / APRICAUT_APP_PRIVATE_KEY, for the org-wide App token)"
+        required: true
+
+jobs:
+  fanout:
+    runs-on: ubuntu-latest
+    env:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    steps:
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+
+      - name: Read apricaut App creds from Doppler
+        id: app
+        run: |
+          set -euo pipefail
+          id="$(doppler secrets get APRICAUT_APP_ID --project platform --config common --plain)"
+          echo "::add-mask::$id"
+          echo "app-id=$id" >> "$GITHUB_OUTPUT"
+
+          key="$(doppler secrets get APRICAUT_APP_PRIVATE_KEY --project platform --config common --plain)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$key"
+          {
+            echo "private-key<<__PEM__"
+            printf '%s\n' "$key"
+            echo "__PEM__"
+          } >> "$GITHUB_OUTPUT"
+
+      # No `repositories:` → org-wide token, so newly-discovered dependents
+      # need no per-repo bookkeeping (same posture as the private-dep token in
+      # rust-library.yml).
+      - name: Mint apricaut App token
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ steps.app.outputs.app-id }}
+          private-key: ${{ steps.app.outputs.private-key }}
+          owner: apricaut
+
+      # `cargo update -p` refreshes each dependent's lockfile; private
+      # apricaut git deps resolve through the App token.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Open bump PRs in every dependent repo
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TAG: ${{ github.ref_name }}
+          SRC_REPO: ${{ github.repository }}
+          AUTOMERGE: ${{ inputs.automerge }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "apricaut-platform[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global \
+            url."https://x-access-token:${GH_TOKEN}@github.com/apricaut/".insteadOf \
+            "https://github.com/apricaut/"
+
+          SRC_NAME="${SRC_REPO##*/}"
+          BRANCH="chore/bump-${SRC_NAME}-${TAG}"
+
+          # Discover dependents: any org repo whose Cargo.toml mentions this
+          # repo's URL. Excludes the source repo itself.
+          mapfile -t DEPS < <(gh api -X GET search/code \
+            -f q="org:apricaut \"github.com/${SRC_REPO}\" filename:Cargo.toml" \
+            --paginate --jq '.items[].repository.full_name' 2>/dev/null | sort -u | grep -vx "$SRC_REPO" || true)
+
+          # Fallback: code search can lag or be unavailable to App tokens —
+          # sweep every non-archived org repo's root Cargo.toml instead.
+          # (Root-manifest-only is the org convention; the code-search path
+          # above also catches nested manifests when it works.)
+          if [ "${#DEPS[@]}" -eq 0 ]; then
+            echo "code search returned nothing; falling back to org sweep" >&2
+            mapfile -t DEPS < <(gh api --paginate orgs/apricaut/repos \
+              --jq '.[] | select(.archived | not) | .full_name' | grep -vx "$SRC_REPO" | \
+              while read -r R; do
+                if gh api "repos/$R/contents/Cargo.toml" --jq .content 2>/dev/null | \
+                   base64 -d 2>/dev/null | grep -q "github.com/${SRC_REPO}\""; then
+                  echo "$R"
+                fi
+              done)
+          fi
+
+          echo "## release-fanout: ${SRC_REPO}@${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${#DEPS[@]}" -eq 0 ]; then
+            echo "No dependents found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          for DEP in "${DEPS[@]}"; do
+            echo "=== $DEP ==="
+            # Skip if the bump branch already exists (idempotent re-runs).
+            if gh api "repos/$DEP/branches/$BRANCH" >/dev/null 2>&1; then
+              echo "- $DEP: branch $BRANCH already exists — skipped" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            rm -rf dep && git clone --depth 1 "https://github.com/$DEP" dep
+            pushd dep >/dev/null
+
+            # Rewrite every Cargo.toml line that pins THIS repo by tag;
+            # collect the dependency names for the lockfile refresh.
+            PKGS="$(python3 - "$SRC_REPO" "$TAG" <<'PY'
+          import pathlib, re, sys
+          src_repo, tag = sys.argv[1], sys.argv[2]
+          url = re.escape(f"https://github.com/{src_repo}")
+          line_re = re.compile(
+              r'^(?P<name>[A-Za-z0-9_-]+)\s*=\s*\{(?P<body>[^}]*git\s*=\s*"'
+              + url + r'"[^}]*)\}'
+          )
+          tag_re = re.compile(r'(tag\s*=\s*")[^"]+(")')
+          pkgs = set()
+          for path in pathlib.Path(".").rglob("Cargo.toml"):
+              text = path.read_text()
+              out, changed = [], False
+              for line in text.splitlines(keepends=True):
+                  m = line_re.match(line.strip())
+                  if m and "tag" in m.group("body"):
+                      new = tag_re.sub(lambda t: t.group(1) + tag + t.group(2), line)
+                      if new != line:
+                          changed = True
+                          pkgs.add(m.group("name"))
+                      line = new
+                  out.append(line)
+              if changed:
+                  path.write_text("".join(out))
+          print(" ".join(sorted(pkgs)))
+          PY
+          )"
+
+            if git diff --quiet; then
+              echo "- $DEP: already on ${TAG} — skipped" >> "$GITHUB_STEP_SUMMARY"
+              popd >/dev/null; continue
+            fi
+
+            # Refresh lockfiles wherever one exists next to a changed manifest.
+            if [ -f Cargo.lock ]; then
+              for P in $PKGS; do cargo update -p "$P" || true; done
+            fi
+
+            git checkout -b "$BRANCH"
+            git add -A
+            git commit -m "chore(deps): ${SRC_NAME} ${TAG} — automated release fan-out
+
+          Opened by release-fanout on the ${SRC_REPO}@${TAG} tag push so no
+          repo silently falls releases behind. CI on this PR is the gate."
+            git push -u origin "$BRANCH"
+            PR_URL="$(gh pr create --repo "$DEP" --base "$(gh api "repos/$DEP" --jq .default_branch)" \
+              --head "$BRANCH" \
+              --title "chore(deps): ${SRC_NAME} ${TAG}" \
+              --body "Automated release fan-out: \`${SRC_REPO}\` tagged \`${TAG}\`, and this repo pins it by tag in Cargo.toml. This PR moves the pin (and lockfile) to the new release — this repo's own CI is the gate. One release, one deliberate fleet-wide bump.")"
+            if [ "$AUTOMERGE" = "true" ]; then
+              gh pr merge --repo "$DEP" --squash --auto "$PR_URL" || true
+            fi
+            echo "- $DEP: $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+            popd >/dev/null
+          done
