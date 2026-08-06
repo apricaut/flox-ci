@@ -202,7 +202,7 @@ jobs:
 
       # ---- everything below runs ONLY on push to main ----
       - name: Publish package + push the runtime env to FloxHub
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         # 1. publish: BUILDS the target from a clean clone + publishes it ->
         #    package <owner>/<repo>  (this is the ONE app build per run)
         # 2. install it into the deploy env (relocks onto the new generation)
@@ -246,7 +246,7 @@ jobs:
       # The private key is masked line-by-line before it ever reaches a step output.
       - name: Read apricaut App creds from Doppler
         id: app
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           DP_PROJECT: ${{ inputs.doppler_project }}
           DP_CONFIG: ${{ inputs.doppler_config }}
@@ -268,7 +268,7 @@ jobs:
       # which is the 403 this replaces). The action does the JWT signing for us.
       - name: Mint apricaut App token
         id: token
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ steps.app.outputs.app-id }}
@@ -277,7 +277,7 @@ jobs:
           repositories: ${{ steps.app.outputs.repo }}
 
       - name: Promote to the cluster (open + auto-merge a deploy PR)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         # `flox push` updated FloxHub, but ArgoCD watches Git, not FloxHub, and the
         # pod only re-pulls its environment on restart. We set flox.dev/environment
         # to $OWNER/$APP (so an owner migration is picked up automatically) and bump
