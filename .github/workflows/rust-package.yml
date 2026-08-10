@@ -24,11 +24,20 @@ on:
         description: "Doppler config within the project"
         type: string
         default: common
+      runs_on:
+        description: >-
+          Runner label to build+publish on. flox builds are per-host, so a
+          package that must run on multiple systems is published by calling
+          this workflow once per platform (a matrix in the caller), each with
+          its own runner. Defaults to the linux runner — existing single-
+          platform callers are unaffected.
+        type: string
+        default: blacksmith-4vcpu-ubuntu-2404
 
 jobs:
   publish:
-    name: publish ${{ inputs.package }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    name: publish ${{ inputs.package }} (${{ inputs.runs_on }})
+    runs-on: ${{ inputs.runs_on }}
     env:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     steps:
