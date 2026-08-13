@@ -329,6 +329,9 @@ jobs:
           #    ArgoCD + crossplane then roll on. Without this a tenant publishes
           #    but never rolls — it keeps running old code until a manual restart.
           APP_CLAIM="apps/$APP/base/app.yaml"
+          #  - PLATFORM: an internal platform service on the PlatformApi XRD —
+          #    same spec.revision bump, on apps/<name>/base/platformapi.yaml.
+          PLATFORM_CLAIM="apps/$APP/base/platformapi.yaml"
           if [ -n "${SHARED_REVISION_FILE:-}" ]; then
             if [ ! -f "$SHARED_REVISION_FILE" ]; then
               echo "shared_revision_file '$SHARED_REVISION_FILE' not found on $GITOPS_REPO main; skipping promote" >&2
@@ -349,6 +352,9 @@ jobs:
           elif [ -f "$APP_CLAIM" ]; then
             TARGET="$APP_CLAIM"
             SHA="$GITHUB_SHA" yq -i '.spec.revision = strenv(SHA)' "$APP_CLAIM"
+          elif [ -f "$PLATFORM_CLAIM" ]; then
+            TARGET="$PLATFORM_CLAIM"
+            SHA="$GITHUB_SHA" yq -i '.spec.revision = strenv(SHA)' "$PLATFORM_CLAIM"
           else
             # First green build of a NEW service/tenant: apps/<name>/ lives on the
             # unmerged new-service PR (head branch service/<app>/*). Auto-merge
@@ -364,7 +370,7 @@ jobs:
                 echo "new-service PR merge not ready (attempt ${attempt}); retrying..."; sleep 5
               done
             fi
-            echo "neither $DEPLOY nor $APP_CLAIM on $GITOPS_REPO main yet and no open service/$APP PR; skipping promote"
+            echo "none of $DEPLOY / $APP_CLAIM / $PLATFORM_CLAIM on $GITOPS_REPO main yet and no open service/$APP PR; skipping promote"
             exit 0
           fi
           if git diff --quiet -- "$TARGET"; then
