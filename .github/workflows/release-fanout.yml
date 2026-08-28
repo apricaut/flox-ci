@@ -167,9 +167,22 @@ jobs:
               popd >/dev/null; continue
             fi
 
-            # Refresh lockfiles wherever one exists next to a changed manifest.
+            # Refresh the lockfile wherever one exists next to a changed
+            # manifest. Plain `cargo update` (NOT `-p "$P"`) -- confirmed
+            # live 2026-08-27: `-p <name>` needs an unambiguous package-id,
+            # but a dependent mid-upgrade often pins the SAME crate name at
+            # two tags/sources at once (e.g. v0.3.14 and v0.4.0 of the same
+            # crate both present in one Cargo.lock), which makes `-p <name>`
+            # fail with "multiple packages ... ambiguous". The `|| true`
+            # that used to guard this silently swallowed that failure,
+            # leaving Cargo.lock on the OLD commit while Cargo.toml claimed
+            # the new tag -- the bump PR looked correct but the dependent
+            # never actually built the new code (apricaut-renderer#233).
+            # No `|| true` here on purpose: a real failure must fail this
+            # step, not silently ship an inert bump.
             if [ -f Cargo.lock ]; then
-              for P in $PKGS; do cargo update -p "$P" || true; done
+              echo "bumped: $PKGS"
+              cargo update
             fi
 
             git checkout -b "$BRANCH"
